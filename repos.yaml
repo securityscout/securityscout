@@ -1,0 +1,21 @@
+# Monitored repositories (ADR-009, ADR-015). Read once at startup; restart required after edits.
+# Recommended: chmod 600 repos.yaml
+repos:
+  - name: example-app
+    github_org: your-org
+    github_repo: your-repo
+    mode: observe
+    slack_channel: "#security-alerts"
+    allowed_workflows: []
+    notify_on_severity:
+      - critical
+      - high
+    require_approval_for:
+      - critical
+      - high
+      - medium
+    issue_trackers:
+      - type: github_issues
+        security_label: security
+        search_closed: true
+    dedup_semantic_search: false
