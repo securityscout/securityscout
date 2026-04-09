@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 7
+      semver-major-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-major-days: 7
+    groups:
+      python-deps:
+        patterns: ["*"]
+        exclude-patterns: ["anthropic", "fastapi", "sqlalchemy"]
+      core-deps:
+        patterns: ["anthropic", "fastapi", "sqlalchemy"]

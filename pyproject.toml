@@ -1,0 +1,151 @@
+[build-system]
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
+
+[project]
+name = "security-scout"
+dynamic = ["version"]
+requires-python = ">=3.14"
+description = "General-purpose security agent for vulnerability triage and validation"
+license = { text = "MIT" }
+dependencies = [
+    "anthropic>=0.52",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "arq>=0.26",
+    "sqlalchemy[asyncio]>=2.0",
+    "alembic>=1.15",
+    "aiosqlite>=0.20",
+    "asyncpg>=0.30",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "slack-bolt>=1.21",
+    "PyGithub>=2.5",
+    "httpx>=0.28",
+    "cvss>=3.2",
+    "docker>=7.1",
+    "structlog>=24.4",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.5",
+    "pytest-mock>=3.14",
+    "pytest-timeout>=2.3",
+    "pytest-cov>=6.0",
+    "coverage[toml]>=7.6",
+    "ruff>=0.11",
+    "mypy>=1.14",
+    "pre-commit>=4.0",
+]
+
+# ── Hatch / versioning ────────────────────────────────────────────────────────
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+enable = true
+vcs = "git"
+style = "semver"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agents", "src/tools", "src/webhooks"]
+
+# ── Ruff ──────────────────────────────────────────────────────────────────────
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade — enforces 3.14+ syntax
+    "ARG",    # flake8-unused-arguments
+    "RUF",    # ruff-specific rules
+    "T20",    # flake8-print — no print() in production code
+    "TID251", # flake8-tidy-imports — banned imports
+    "PIE",    # flake8-pie
+    "SIM",    # flake8-simplify
+    "PT",     # flake8-pytest-style
+    "S",      # flake8-bandit — security lint
+]
+ignore = [
+    "E501",   # line length handled by formatter
+    "S101",   # assert in tests is fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["T20", "ARG", "S"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agents", "tools", "webhooks", "models", "config", "worker", "mcp_server"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.Optional".msg = "Use X | None (PEP 604)"
+"typing.Union".msg = "Use X | Y (PEP 604)"
+"typing.List".msg = "Use list[] (PEP 585)"
+"typing.Dict".msg = "Use dict[] (PEP 585)"
+"typing.Tuple".msg = "Use tuple[] (PEP 585)"
+"typing.Set".msg = "Use set[] (PEP 585)"
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ── Mypy ──────────────────────────────────────────────────────────────────────
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+warn_return_any = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "docker.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "arq.*"
+ignore_missing_imports = true
+
+# ── Pytest ────────────────────────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+xfail_strict = true
+filterwarnings = ["error"]
+timeout = 30
+markers = [
+    "slow: sandbox/Docker tests (deselect with -m 'not slow')",
+    "integration: tests requiring external services (Redis, DB)",
+]
+addopts = "-x --strict-markers"
+
+# ── Coverage ──────────────────────────────────────────────────────────────────
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+fail_under = 0
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]
