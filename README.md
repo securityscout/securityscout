@@ -22,6 +22,8 @@ make check
 
 ## Development
 
+Commit and PR expectations (Conventional Commits, pre-merge checks): see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+
 ```
 make format      # auto-format with ruff
 make lint        # lint (no auto-fix)
