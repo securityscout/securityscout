@@ -4,7 +4,7 @@ import json
 import math
 import re
 import uuid
-from typing import Any, Literal, Self, cast
+from typing import Any, Literal, NoReturn, Self, cast
 
 import httpx
 import structlog
@@ -364,6 +364,84 @@ def _as_slack_json(
     return data
 
 
+def _raise_slack_chat_post_http_error(
+    response: httpx.Response,
+    *,
+    finding_id: str,
+    workflow_run_id: uuid.UUID | None,
+) -> NoReturn:
+    err = SlackAPIError.from_status(
+        response.status_code,
+        response.reason_phrase or f"HTTP {response.status_code}",
+    )
+    _LOG.warning(
+        "slack_api_http_error",
+        metric_name="api_error_total",
+        api="slack",
+        http_status=err.http_status,
+        finding_id=finding_id,
+        workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
+    )
+    raise err
+
+
+def _maybe_log_slack_chat_post_warning(
+    payload: dict[str, Any],
+    *,
+    finding_id: str,
+    log_slack_api_warning: bool,
+) -> None:
+    if not log_slack_api_warning:
+        return
+    warn = payload.get("warning")
+    if isinstance(warn, str):
+        _LOG.warning("slack_api_warning", warning=warn, finding_id=finding_id)
+
+
+def _raise_slack_chat_post_not_ok(
+    payload: dict[str, Any],
+    *,
+    finding_id: str,
+    workflow_run_id: uuid.UUID | None,
+    log_slack_api_warning: bool,
+) -> NoReturn:
+    _maybe_log_slack_chat_post_warning(
+        payload,
+        finding_id=finding_id,
+        log_slack_api_warning=log_slack_api_warning,
+    )
+    code = payload.get("error")
+    code_str = code if isinstance(code, str) else "unknown"
+    err = SlackAPIError.from_slack_error(code_str, f"Slack chat.postMessage failed: {code_str}")
+    _LOG.warning(
+        "slack_api_error",
+        metric_name="api_error_total",
+        api="slack",
+        slack_error=code_str,
+        finding_id=finding_id,
+        workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
+    )
+    raise err
+
+
+def _slack_chat_post_channel_ts_or_raise(
+    payload: dict[str, Any],
+    *,
+    finding_id: str,
+    workflow_run_id: uuid.UUID | None,
+) -> tuple[str, str]:
+    ch = payload.get("channel")
+    ts = payload.get("ts")
+    if not isinstance(ch, str) or not isinstance(ts, str):
+        msg = "Slack chat.postMessage response missing channel or ts"
+        raise SlackMalformedResponseError(
+            msg,
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        )
+    return ch, ts
+
+
 class SlackClient:
     """Posts Block Kit messages via ``chat.postMessage``.
 
@@ -408,6 +486,48 @@ class SlackClient:
             "Content-Type": "application/json; charset=utf-8",
         }
 
+    def _chat_post_message_response_to_result(
+        self,
+        response: httpx.Response,
+        *,
+        finding_id: str,
+        workflow_run_id: uuid.UUID | None,
+        success_log_event: str,
+        success_metric_name: str,
+        log_slack_api_warning: bool = True,
+    ) -> SlackPostMessageResult:
+        if not response.is_success:
+            _raise_slack_chat_post_http_error(
+                response,
+                finding_id=finding_id,
+                workflow_run_id=workflow_run_id,
+            )
+        payload = _as_slack_json(
+            response,
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        )
+        if not payload.get("ok"):
+            _raise_slack_chat_post_not_ok(
+                payload,
+                finding_id=finding_id,
+                workflow_run_id=workflow_run_id,
+                log_slack_api_warning=log_slack_api_warning,
+            )
+        ch, ts = _slack_chat_post_channel_ts_or_raise(
+            payload,
+            finding_id=finding_id,
+            workflow_run_id=workflow_run_id,
+        )
+        _LOG.info(
+            success_log_event,
+            metric_name=success_metric_name,
+            channel=ch,
+            finding_id=finding_id,
+            workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
+        )
+        return SlackPostMessageResult(channel=ch, message_ts=ts)
+
     async def send_finding(
         self,
         channel: str,
@@ -434,62 +554,13 @@ class SlackClient:
             json=body,
             headers=self._auth_headers(),
         )
-
-        if not response.is_success:
-            err = SlackAPIError.from_status(
-                response.status_code,
-                response.reason_phrase or f"HTTP {response.status_code}",
-            )
-            _LOG.warning(
-                "slack_api_http_error",
-                metric_name="api_error_total",
-                api="slack",
-                http_status=err.http_status,
-                finding_id=finding_id,
-                workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
-            )
-            raise err
-
-        payload = _as_slack_json(
+        return self._chat_post_message_response_to_result(
             response,
             finding_id=finding_id,
             workflow_run_id=workflow_run_id,
+            success_log_event="slack_finding_posted",
+            success_metric_name="slack_finding_posted",
         )
-        if not payload.get("ok"):
-            code = payload.get("error")
-            code_str = code if isinstance(code, str) else "unknown"
-            warn = payload.get("warning")
-            if isinstance(warn, str):
-                _LOG.warning("slack_api_warning", warning=warn, finding_id=finding_id)
-            err = SlackAPIError.from_slack_error(code_str, f"Slack chat.postMessage failed: {code_str}")
-            _LOG.warning(
-                "slack_api_error",
-                metric_name="api_error_total",
-                api="slack",
-                slack_error=code_str,
-                finding_id=finding_id,
-                workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
-            )
-            raise err
-
-        ch = payload.get("channel")
-        ts = payload.get("ts")
-        if not isinstance(ch, str) or not isinstance(ts, str):
-            msg = "Slack chat.postMessage response missing channel or ts"
-            raise SlackMalformedResponseError(
-                msg,
-                finding_id=finding_id,
-                workflow_run_id=workflow_run_id,
-            )
-
-        _LOG.info(
-            "slack_finding_posted",
-            metric_name="slack_finding_posted",
-            channel=ch,
-            finding_id=finding_id,
-            workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
-        )
-        return SlackPostMessageResult(channel=ch, message_ts=ts)
 
     async def notify_workflow_error(
         self,
@@ -533,52 +604,11 @@ class SlackClient:
             headers=self._auth_headers(),
         )
         fid = finding_id or "none"
-        if not response.is_success:
-            err = SlackAPIError.from_status(
-                response.status_code,
-                response.reason_phrase or f"HTTP {response.status_code}",
-            )
-            _LOG.warning(
-                "slack_api_http_error",
-                metric_name="api_error_total",
-                api="slack",
-                http_status=err.http_status,
-                finding_id=fid,
-                workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
-            )
-            raise err
-        payload = _as_slack_json(
+        return self._chat_post_message_response_to_result(
             response,
             finding_id=fid,
             workflow_run_id=workflow_run_id,
+            success_log_event="slack_workflow_error_posted",
+            success_metric_name="slack_workflow_error_posted",
+            log_slack_api_warning=False,
         )
-        if not payload.get("ok"):
-            code = payload.get("error")
-            code_str = code if isinstance(code, str) else "unknown"
-            err = SlackAPIError.from_slack_error(code_str, f"Slack chat.postMessage failed: {code_str}")
-            _LOG.warning(
-                "slack_api_error",
-                metric_name="api_error_total",
-                api="slack",
-                slack_error=code_str,
-                finding_id=fid,
-                workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
-            )
-            raise err
-        ch = payload.get("channel")
-        ts = payload.get("ts")
-        if not isinstance(ch, str) or not isinstance(ts, str):
-            msg = "Slack chat.postMessage response missing channel or ts"
-            raise SlackMalformedResponseError(
-                msg,
-                finding_id=fid,
-                workflow_run_id=workflow_run_id,
-            )
-        _LOG.info(
-            "slack_workflow_error_posted",
-            metric_name="slack_workflow_error_posted",
-            channel=ch,
-            finding_id=fid,
-            workflow_run_id=str(workflow_run_id) if workflow_run_id else None,
-        )
-        return SlackPostMessageResult(channel=ch, message_ts=ts)
