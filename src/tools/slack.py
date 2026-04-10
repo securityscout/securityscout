@@ -179,6 +179,40 @@ def fallback_notification_text(report: FindingReportPayload) -> str:
     return f"[{sev.upper()}] {title} — {report.source_url}"
 
 
+def _cvss_line_for_report(report: FindingReportPayload) -> str:
+    if report.cvss_score is None:
+        return "—"
+    line = f"{report.cvss_score:g}"
+    if not report.cvss_vector:
+        return line
+    vec_safe = escape_slack_mrkdwn(report.cvss_vector).replace("`", "'")
+    return f"{line} (`{vec_safe}`)"
+
+
+def _dedup_section_block(dedup: DedupMatchInfo) -> SectionBlock:
+    lines = [
+        f"*Known vulnerability match* (tier {dedup.tier})",
+        f"*Tracker:* {escape_slack_mrkdwn(dedup.tracker_name)}",
+    ]
+    if dedup.duplicate_of:
+        lines.append(f"*Match:* {escape_slack_mrkdwn(dedup.duplicate_of)}")
+    if dedup.match_url:
+        u = _slack_link_url(dedup.match_url)
+        lines.append(f"*Link:* <{u}|View match>")
+    return SectionBlock(text=MarkdownTextObject(text="\n".join(lines)))
+
+
+def _footer_context_text(
+    report: FindingReportPayload,
+    source_link: str,
+    workflow_run_id: uuid.UUID | None,
+) -> str:
+    ctx = f"Finding `{report.finding_id}`"
+    if workflow_run_id is not None:
+        ctx += f" · workflow run `{workflow_run_id}`"
+    return f"{ctx} · <{source_link}|source>"
+
+
 def build_finding_blocks(
     report: FindingReportPayload,
     *,
@@ -193,12 +227,7 @@ def build_finding_blocks(
 
     cve_line = ", ".join(report.cve_ids) if report.cve_ids else "—"
     cwe_line = ", ".join(report.cwe_ids) if report.cwe_ids else "—"
-    cvss_line = "—"
-    if report.cvss_score is not None:
-        cvss_line = f"{report.cvss_score:g}"
-        if report.cvss_vector:
-            vec_safe = escape_slack_mrkdwn(report.cvss_vector).replace("`", "'")
-            cvss_line = f"{cvss_line} (`{vec_safe}`)"
+    cvss_line = _cvss_line_for_report(report)
 
     ssvc = escape_slack_mrkdwn(report.ssvc_action) if report.ssvc_action else "—"
     conf = _format_confidence(report.confidence)
@@ -251,24 +280,11 @@ def build_finding_blocks(
     blocks.append(SectionBlock(text=MarkdownTextObject(text=f"*Reproduction steps*\n{repro}")))
 
     if report.dedup is not None:
-        d = report.dedup
-        lines = [
-            f"*Known vulnerability match* (tier {d.tier})",
-            f"*Tracker:* {escape_slack_mrkdwn(d.tracker_name)}",
-        ]
-        if d.duplicate_of:
-            lines.append(f"*Match:* {escape_slack_mrkdwn(d.duplicate_of)}")
-        if d.match_url:
-            u = _slack_link_url(d.match_url)
-            lines.append(f"*Link:* <{u}|View match>")
-        blocks.append(SectionBlock(text=MarkdownTextObject(text="\n".join(lines))))
+        blocks.append(_dedup_section_block(report.dedup))
 
     blocks.append(DividerBlock())
 
-    ctx = f"Finding `{report.finding_id}`"
-    if workflow_run_id is not None:
-        ctx += f" · workflow run `{workflow_run_id}`"
-    ctx += f" · <{source_link}|source>"
+    ctx = _footer_context_text(report, source_link, workflow_run_id)
     blocks.append(ContextBlock(elements=[MarkdownTextObject(text=ctx)]))
 
     return [cast(dict[str, Any], b.to_dict()) for b in blocks]
