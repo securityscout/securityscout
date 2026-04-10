@@ -71,51 +71,54 @@ _DISRUPTIVE_CODEPOINTS: Final[frozenset[str]] = frozenset(
     )
 )
 
+_REDACTED_INJECTION_MARKER: Final[str] = "[redacted-injection-pattern]"
+_REDACTED_INJECTION_MARKER_WITH_COLON: Final[str] = f"{_REDACTED_INJECTION_MARKER}: "
+
 # High-signal prompt-injection phrases (case-insensitive). Curated for common jailbreak / override text.
 _INJECTION_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
     (
         re.compile(r"(?is)\bignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?|context)\b"),
-        "[redacted-injection-pattern]",
+        _REDACTED_INJECTION_MARKER,
     ),
     (
         re.compile(r"(?is)\bdisregard\s+(all\s+)?(previous|prior|above)\b"),
-        "[redacted-injection-pattern]",
+        _REDACTED_INJECTION_MARKER,
     ),
     (
         re.compile(r"(?is)\bforget\s+(everything|all\s+)?(above|before|prior)\b"),
-        "[redacted-injection-pattern]",
+        _REDACTED_INJECTION_MARKER,
     ),
     (
         re.compile(
             r"(?is)\b(new|updated?)\s+instructions?\s*:\s*",
         ),
-        "[redacted-injection-pattern]: ",
+        _REDACTED_INJECTION_MARKER_WITH_COLON,
     ),
     (
         re.compile(r"(?is)\b(system|developer)\s+message\s*:\s*"),
-        "[redacted-injection-pattern]: ",
+        _REDACTED_INJECTION_MARKER_WITH_COLON,
     ),
     (
         re.compile(r"(?is)\b(you\s+are\s+now|enter|enable)\s+(DAN|jailbreak|developer)\s+mode\b"),
-        "[redacted-injection-pattern]",
+        _REDACTED_INJECTION_MARKER,
     ),
     (
         re.compile(r"(?is)\boverride\s+(prior|previous|system)\s+(instructions?|rules?)\b"),
-        "[redacted-injection-pattern]",
+        _REDACTED_INJECTION_MARKER,
     ),
     (
         re.compile(r"(?is)\[\s*/?\s*(INST|SYSTEM)\s*\]"),
-        "[redacted-injection-pattern]",
+        _REDACTED_INJECTION_MARKER,
     ),
     (
         re.compile(r"(?is)<\s*/?\s*(system|user|assistant)\s*>"),
-        "[redacted-injection-pattern]",
+        _REDACTED_INJECTION_MARKER,
     ),
     (
         re.compile(
             r"(?is)\b(end\s+of|terminate)\s+(system|user)\s+(message|prompt)\b",
         ),
-        "[redacted-injection-pattern]",
+        _REDACTED_INJECTION_MARKER,
     ),
 ]
 

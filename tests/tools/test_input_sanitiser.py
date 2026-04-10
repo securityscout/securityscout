@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from ai.external_content_prompts import (
@@ -97,7 +99,7 @@ def test_sanitize_text_default_max_uses_default_limit() -> None:
 
 def test_sanitize_text_rejects_non_str() -> None:
     with pytest.raises(TypeError, match="sanitize_text expects str"):
-        sanitize_text(None)  # type: ignore[arg-type]
+        sanitize_text(cast(str, None))
 
 
 def test_sanitize_text_rejects_zero_max_chars() -> None:
