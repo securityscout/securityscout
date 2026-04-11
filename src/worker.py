@@ -1,5 +1,3 @@
-"""ARQ worker: advisory workflow jobs (Phase 1). Run: ``arq worker.WorkerSettings`` with ``PYTHONPATH=src``."""
-
 from __future__ import annotations
 
 import os
