@@ -153,7 +153,7 @@ branch = true
 parallel = true
 
 [tool.coverage.report]
-fail_under = 0
+fail_under = 80
 show_missing = true
 skip_covered = true
 exclude_lines = [

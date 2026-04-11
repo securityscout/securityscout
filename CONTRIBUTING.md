@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for helping with Security Scout. This document describes **commit messages** and **pre-merge checks**. For architecture and coding rules, see `CLAUDE.md` and `documentation/`.
+Thank you for helping with Security Scout. This document describes **commit messages** and **pre-merge checks**. For architecture and coding rules, see `CLAUDE.md` and `docs/`.
 
 ## Commit messages (Conventional Commits)
 
@@ -33,10 +33,6 @@ fix(webhooks): reject replayed payloads outside window
 
 chore(ci): pin action digests for zizmor
 ```
-
-### Why not ad-hoc tags?
-
-Older notes sometimes used subjects like `[phase-1] …`. Prefer **`type(scope):`** so messages stay compatible with changelog tools and match the Conventional Commits ecosystem (used widely, e.g. in projects building on [semantic-release](https://github.com/semantic-release/semantic-release) and similar tooling).
 
 ## Before you open a PR
 
