@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -223,3 +223,48 @@ async def test_slack_transient_schedules_retry(db_session, mocker) -> None:
     assert run.retry_count == 1
     schedule.assert_awaited_once()
     assert schedule.await_args[0][0].reason == "slack_transient"
+
+
+@pytest.mark.asyncio
+async def test_advisory_to_slack_seconds_metric_emitted(db_session, mocker) -> None:
+    repo = _repo()
+
+    async def fake_triage(session, *args: object, **kwargs: object) -> Finding:
+        f = Finding(
+            workflow=WorkflowKind.advisory,
+            source_ref="https://github.com/advisories/GHSA-TEST",
+            severity=Severity.high,
+            ssvc_action=SSVCAction.act,
+            status=FindingStatus.unconfirmed,
+            triage_confidence=0.9,
+            title="Test advisory",
+        )
+        session.add(f)
+        await session.flush()
+        return f
+
+    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=fake_triage)
+
+    async with httpx.AsyncClient(base_url="https://slack.com/api", transport=_slack_transport_ok()) as http:
+        slack = SlackClient("xoxb-test", client=http)
+        gh = MagicMock(spec=GitHubClient)
+        with patch("agents.orchestrator._LOG") as mock_log:
+            mock_log.bind.return_value = mock_log
+            run = await run_advisory_workflow(
+                db_session,
+                repo,
+                gh,
+                http,
+                slack,
+                ghsa_id="GHSA-TEST-ABCD-EFGH",
+            )
+
+    assert run.state == AdvisoryWorkflowState.done.value
+
+    metric_calls = [
+        c for c in mock_log.info.call_args_list if c.kwargs.get("metric_name") == "advisory_to_slack_seconds"
+    ]
+    assert len(metric_calls) == 1
+    kw = metric_calls[0].kwargs
+    assert kw["duration_seconds"] >= 0
+    assert "workflow_run_id" in kw
