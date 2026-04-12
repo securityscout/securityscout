@@ -133,11 +133,13 @@ async def run_advisory_workflow(
     run_stable_id: uuid.UUID
 
     if resume_workflow_run_id is None:
+        workflow_started_at = _now_utc()
         run = WorkflowRun(
             workflow_type=WorkflowKind.advisory,
             state=AdvisoryWorkflowState.received.value,
             retry_count=0,
             finding_id=None,
+            started_at=workflow_started_at,
         )
         session.add(run)
         await session.flush()
@@ -619,9 +621,19 @@ async def run_advisory_workflow(
         )
         return run
 
+    done_at = _now_utc()
     run.state = AdvisoryWorkflowState.done.value
-    run.completed_at = _now_utc()
+    run.completed_at = done_at
     await session.commit()
+
+    started = run.started_at.replace(tzinfo=UTC) if run.started_at.tzinfo is None else run.started_at
+    elapsed = (done_at - started).total_seconds()
+    log.info(
+        "advisory_to_slack_delivered",
+        metric_name="advisory_to_slack_seconds",
+        duration_seconds=elapsed,
+        workflow_run_id=str(run_stable_id),
+    )
 
     log.info(
         "workflow_state_transition",
