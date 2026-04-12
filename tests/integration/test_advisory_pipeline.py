@@ -57,11 +57,11 @@ def _mock_transport() -> tuple[httpx.MockTransport, list[str]]:
     def handle(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
         url = str(request.url)
-        if request.method == "GET" and f"/repos/acme/app/security-advisories/{_GHSA}" in url:
+        if request.method == "GET" and request.url.path == f"/repos/acme/app/security-advisories/{_GHSA}":
             return httpx.Response(200, json=_ADVISORY_JSON)
-        if request.method == "POST" and "slack.com" in url:
+        if request.method == "POST" and request.url.host.endswith("slack.com"):
             return httpx.Response(200, json={"ok": True, "channel": "CINTEGRATION", "ts": "1111.2222"})
-        if request.method == "POST" and "api.osv.dev" in url:
+        if request.method == "POST" and request.url.host == "api.osv.dev":
             return httpx.Response(200, json={"vulns": []})
         return httpx.Response(404, text=f"unexpected request: {request.method} {url}")
 
