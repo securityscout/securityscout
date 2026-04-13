@@ -1,4 +1,4 @@
-# Monitored repositories (ADR-009, ADR-015). Read once at startup; restart required after edits.
+# Monitored repositories. Read once at startup; restart required after edits.
 # Recommended: chmod 600 repos.yaml
 repos:
   - name: example-app
