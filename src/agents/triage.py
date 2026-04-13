@@ -1,4 +1,22 @@
-"""Advisory triage: CVSS, SSVC, dedup, optional LLM refinement (ADR-010/012/017/020, ADR-016 §6)."""
+"""Advisory triage: CVSS, SSVC, dedup, optional LLM refinement.
+
+Tool access (least-privilege):
+    ALLOWED:
+        - scm.fetch_advisory          (via GitHubClient.fetch_*_security_advisory)
+        - input_sanitiser.sanitise    (via sanitize_text / prepare_for_llm)
+
+    NOT ALLOWED:
+        - scm.read_code, scm.fetch_pr_diff, scm.trigger_workflow, etc.
+        - sast_adapter.scan
+        - docker_sandbox.build / run / destroy
+        - nuclei.run
+        - poc_preflight.validate
+        - slack.*
+
+    Enrichment dependencies (read-only, not in the tool access matrix):
+        - tools.issue_tracker    (known-vuln dedup)
+        - tools.osv              (dependency health / prior vulnerability count)
+"""
 
 from __future__ import annotations
 
