@@ -1,3 +1,22 @@
+"""Orchestrator agent: event routing + advisory workflow state machine.
+
+Tool access (least-privilege):
+    ALLOWED:
+        - poc_preflight.validate
+
+    NOT ALLOWED:
+        - scm.fetch_advisory, scm.read_code, scm.fetch_pr_diff, etc.
+        - sast_adapter.scan
+        - docker_sandbox.build / run / destroy
+        - nuclei.run
+        - slack.send_finding, slack.request_approval   (Slack Handler agent)
+
+    Temporary: the orchestrator calls SlackClient directly for finding reports
+    and error notifications until the Slack Handler agent is separated. Once
+    interactive Slack workflows exist, Slack tool access moves to the dedicated
+    handler and the orchestrator delegates via state transitions.
+"""
+
 from __future__ import annotations
 
 import uuid
