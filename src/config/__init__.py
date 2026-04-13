@@ -135,6 +135,13 @@ class Settings(BaseSettings):
     reasoning_model: str = "claude-sonnet-4-6"
     high_stakes_model: str = "claude-opus-4-6"
 
+    # Operational alert thresholds
+    ops_slack_channel: str | None = None
+    alert_stuck_workflow_minutes: int = 10
+    alert_error_rate_threshold: float = 0.20
+    alert_error_rate_window_minutes: int = 60
+    alert_latency_p95_seconds: float = 60.0
+
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:

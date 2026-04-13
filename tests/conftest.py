@@ -16,23 +16,3 @@ async def db_session(tmp_path: Path):
     async with factory() as session:
         yield session
     await engine.dispose()
-
-
-@pytest.fixture
-def mock_github_client(mocker):
-    """Mocked PyGithub client"""
-
-
-@pytest.fixture
-def mock_slack_client(mocker):
-    """Mocked Slack WebClient"""
-
-
-@pytest.fixture
-def sample_advisory():
-    """Realistic GHSA advisory payload"""
-
-
-@pytest.fixture
-def sample_sarif():
-    """Minimal valid SARIF 2.1.0 document"""
