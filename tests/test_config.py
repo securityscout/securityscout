@@ -45,6 +45,15 @@ def test_load_repos_manifest_rejects_empty_document(tmp_path: Path) -> None:
         load_repos_manifest(p)
 
 
+def test_load_repos_manifest_rejects_malformed_yaml(tmp_path: Path) -> None:
+    p = tmp_path / "repos.yaml"
+    p.write_bytes(b"repos:\n  - name: bad\n  unindented: [\n")
+    with pytest.raises(ValueError, match=str(p)) as exc_info:
+        load_repos_manifest(p)
+    assert "invalid YAML" in str(exc_info.value)
+    assert "line" in str(exc_info.value)
+
+
 def test_load_repos_manifest_rejects_non_mapping_root(tmp_path: Path) -> None:
     p = tmp_path / "repos.yaml"
     p.write_bytes(b"[]\n")

@@ -168,7 +168,13 @@ def _coerce_manifest_payload(data: Any) -> Mapping[str, Any]:
 def load_repos_manifest(path: Path) -> tuple[ReposManifest, str]:
     raw = path.read_bytes()
     digest = compute_repos_yaml_sha256(raw)
-    data = yaml.safe_load(raw)
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        msg = f"{path}: invalid YAML{location}"
+        raise ValueError(msg) from exc
     payload = _coerce_manifest_payload(data)
     manifest = ReposManifest.model_validate(payload)
     return manifest, digest
