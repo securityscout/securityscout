@@ -69,7 +69,7 @@ run:
 	uv run uvicorn main:app --reload --host $(UVICORN_HOST) --port $(UVICORN_PORT)
 
 worker:
-	uv run arq worker.WorkerSettings
+	uv run python src/run_worker.py
 
 migrate: db-upgrade
 
