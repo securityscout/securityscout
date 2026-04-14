@@ -45,7 +45,7 @@ def create_app() -> FastAPI:
             resume_workflow_run_id: str | None = None,
         ) -> str | None:
             job = await redis_pool.enqueue_job(
-                "worker.process_advisory_workflow_job",
+                "process_advisory_workflow_job",
                 repo_name=repo_name,
                 ghsa_id=ghsa_id,
                 advisory_source=advisory_source,
