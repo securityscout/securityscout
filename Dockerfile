@@ -39,10 +39,10 @@ COPY --chown=scout:scout pyproject.toml README.md LICENSE NOTICE /app/
 
 ARG GIT_SHA="unknown"
 ARG BUILD_DATE="unknown"
-LABEL org.opencontainers.image.source="https://github.com/your-org/security-scout" \
+LABEL org.opencontainers.image.source="https://github.com/securityscout/securityscout" \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.title="security-scout" \
+      org.opencontainers.image.title="securityscout" \
       org.opencontainers.image.description="Security advisory triage and validation agent"
 
 USER scout:scout

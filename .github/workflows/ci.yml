@@ -92,7 +92,7 @@ jobs:
           context: .
           push: false
           load: true
-          tags: security-scout:ci-${{ github.sha }}
+          tags: securityscout:ci-${{ github.sha }}
           build-args: |
             GIT_SHA=${{ github.sha }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
@@ -101,7 +101,7 @@ jobs:
       - name: Scan image for CVEs
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
-          image: security-scout:ci-${{ github.sha }}
+          image: securityscout:ci-${{ github.sha }}
           severity-cutoff: high
           fail-build: true
 

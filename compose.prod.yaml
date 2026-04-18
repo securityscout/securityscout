@@ -1,4 +1,4 @@
-name: security-scout
+name: securityscout
 
 x-logging: &logging
   driver: json-file
@@ -11,7 +11,7 @@ x-app-common: &app-common
   build:
     context: .
     dockerfile: Dockerfile
-  image: ${SCOUT_IMAGE:-security-scout:local}
+  image: ${SCOUT_IMAGE:-securityscout:local}
   logging: *logging
   environment:
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
