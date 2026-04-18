@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import asyncio
 import uuid
-from pathlib import Path
 
 import httpx
 import pytest
 
 from tools.github import GitHubAPIError, GitHubClient
 from tools.scm import AdvisoryData, DiffData, RepositoryMetadata
-from tools.scm.github import GitHubSCMProvider, _split_repo_slug
+from tools.scm.github import CloneError, GitHubSCMProvider, _split_repo_slug
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -555,6 +555,92 @@ async def test_search_issues_propagates_tracing_context() -> None:
 
 
 # ---------------------------------------------------------------------------
+# clone_repo
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_clone_repo_success(tmp_path, mocker) -> None:
+    mock_proc = mocker.AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+    create_mock = mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
+
+    provider = GitHubSCMProvider("fake-token")
+    result = await provider.clone_repo("acme/app", "v1.0.0", tmp_path)
+    assert result == tmp_path / "app"
+
+    args = create_mock.call_args[0]
+    assert args[:2] == ("git", "clone")
+    assert "--depth" in args
+    assert "--single-branch" in args
+    assert "--branch" in args
+
+
+@pytest.mark.asyncio
+async def test_clone_repo_failure_raises_clone_error(tmp_path, mocker) -> None:
+    mock_proc = mocker.AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"fatal: Remote branch v999 not found")
+    mock_proc.returncode = 128
+    mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
+
+    provider = GitHubSCMProvider("fake-token")
+    with pytest.raises(CloneError, match="git clone failed"):
+        await provider.clone_repo("acme/app", "v999", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_clone_repo_error_message_redacts_token(tmp_path, mocker) -> None:
+    token = "ghp_s3cr3tT0k3nV4lu3"
+    stderr_with_token = (
+        f"fatal: Authentication failed for 'https://x-access-token:{token}@github.com/acme/app.git'"
+    ).encode()
+    mock_proc = mocker.AsyncMock()
+    mock_proc.communicate.return_value = (b"", stderr_with_token)
+    mock_proc.returncode = 128
+    mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
+
+    provider = GitHubSCMProvider(token)
+    with pytest.raises(CloneError, match="git clone failed") as exc_info:
+        await provider.clone_repo("acme/app", "main", tmp_path)
+
+    error_str = str(exc_info.value)
+    assert token not in error_str
+    assert "<REDACTED>" in error_str
+
+
+@pytest.mark.asyncio
+async def test_clone_repo_timeout_kills_process(tmp_path, mocker) -> None:
+    loop = asyncio.get_event_loop()
+
+    communicate_fut: asyncio.Future[tuple[bytes, bytes]] = loop.create_future()
+    communicate_fut.set_result((b"", b""))
+    wait_fut: asyncio.Future[None] = loop.create_future()
+    wait_fut.set_result(None)
+
+    mock_proc = mocker.MagicMock()
+    mock_proc.communicate = mocker.Mock(return_value=communicate_fut)
+    mock_proc.kill = mocker.Mock()
+    mock_proc.wait = mocker.Mock(return_value=wait_fut)
+
+    mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
+    mocker.patch("asyncio.wait_for", side_effect=TimeoutError)
+
+    provider = GitHubSCMProvider("fake-token")
+    with pytest.raises(CloneError, match="timed out"):
+        await provider.clone_repo("acme/app", "main", tmp_path)
+
+    mock_proc.kill.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_clone_repo_invalid_slug(tmp_path) -> None:
+    provider = GitHubSCMProvider("fake-token")
+    with pytest.raises(ValueError, match="owner/name"):
+        await provider.clone_repo("bad-slug", "main", tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # Not-yet-implemented methods
 # ---------------------------------------------------------------------------
 
@@ -570,5 +656,3 @@ async def test_not_implemented_methods_raise() -> None:
         await provider.set_check_run("acme/app", "sha", name="test", status="completed")
     with pytest.raises(NotImplementedError):
         await provider.trigger_workflow("acme/app", ".github/workflows/ci.yml", "main")
-    with pytest.raises(NotImplementedError):
-        await provider.clone_repo("acme/app", "main", Path("/tmp/test"))

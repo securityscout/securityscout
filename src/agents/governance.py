@@ -38,10 +38,13 @@ def _rule_matches(rule: GovernanceRule, finding: Finding) -> bool:
         is_dup = finding.known_status == KnownStatus.duplicate
         if rule.duplicate != is_dup:
             return False
-    # ``patch_available`` / ``poc_execution`` are reserved for future workflows that will
-    # populate those signals on the Finding. Until then, a rule that specifies either
-    # criterion cannot match anything — treat as no-match rather than error.
-    return not (rule.patch_available is not None or rule.poc_execution is not None)
+    if rule.patch_available is not None and (
+        finding.patch_available is None or finding.patch_available != rule.patch_available
+    ):
+        return False
+    return not (
+        rule.poc_execution is not None and (finding.poc_executed is None or finding.poc_executed != rule.poc_execution)
+    )
 
 
 def decide_governance_tier(

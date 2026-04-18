@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import asyncio
+import re
 import uuid
 from pathlib import Path
 from typing import Literal, Self
 
+from exceptions import SecurityScoutError
 from tools.github import (
     GitHubClient,
     GitHubIssueSearchItem,
@@ -12,6 +15,14 @@ from tools.github import (
 )
 from tools.scm.models import AdvisoryData
 from tools.scm.protocol import DiffData
+
+_CLONE_TIMEOUT_SECONDS = 120
+
+_TOKEN_IN_URL_RE = re.compile(r"(https?://)[^@]+@", re.IGNORECASE)
+
+
+class CloneError(SecurityScoutError):
+    """Raised when ``git clone`` fails."""
 
 
 def _split_repo_slug(repo: str) -> tuple[str, str]:
@@ -33,12 +44,17 @@ class GitHubSCMProvider:
         base_url: str = "https://api.github.com",
         api_version: str = "2022-11-28",
     ) -> None:
+        self._token = token
         self._client = GitHubClient(token, base_url=base_url, api_version=api_version)
 
     @classmethod
-    def from_client(cls, client: GitHubClient) -> GitHubSCMProvider:
-        """Build a provider from an existing ``GitHubClient`` (useful in tests)."""
+    def from_client(cls, client: GitHubClient, *, token: str = "") -> GitHubSCMProvider:
+        """Build a provider from an existing ``GitHubClient`` (useful in tests).
+
+        ``token`` is optional; leave empty if clone_repo is not needed.
+        """
         instance = cls.__new__(cls)
+        instance._token = token
         instance._client = client
         return instance
 
@@ -167,7 +183,40 @@ class GitHubSCMProvider:
         ref: str,
         dest: Path,
     ) -> Path:
-        raise NotImplementedError("clone_repo is not implemented yet")
+        owner, name = _split_repo_slug(repo)
+        clone_url = f"https://x-access-token:{self._token}@github.com/{owner}/{name}.git"
+        dest.mkdir(parents=True, exist_ok=True)
+
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            ref,
+            "--single-branch",
+            clone_url,
+            str(dest / name),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=_CLONE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            msg = f"git clone timed out for {owner}/{name}@{ref} after {_CLONE_TIMEOUT_SECONDS}s"
+            raise CloneError(msg, is_transient=True) from exc
+
+        if proc.returncode != 0:
+            raw = stderr.decode("utf-8", errors="replace").strip()
+            safe_msg = _TOKEN_IN_URL_RE.sub(r"\1<REDACTED>@", raw)
+            msg = f"git clone failed for {owner}/{name}@{ref}: {safe_msg}"
+            raise CloneError(msg)
+        return dest / name
 
     # -- Additional methods required by current agents -----------------------
 
@@ -221,4 +270,4 @@ class GitHubSCMProvider:
         )
 
 
-__all__ = ["GitHubSCMProvider"]
+__all__ = ["CloneError", "GitHubSCMProvider"]
