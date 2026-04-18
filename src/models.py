@@ -31,6 +31,7 @@ class FindingStatus(StrEnum):
     confirmed_high = "confirmed_high"
     confirmed_low = "confirmed_low"
     unconfirmed = "unconfirmed"
+    error = "error"
     false_positive = "false_positive"
     accepted_risk = "accepted_risk"
 
@@ -89,6 +90,8 @@ class Finding(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     reproduction: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    patch_available: Mapped[bool | None] = mapped_column(nullable=True)
+    poc_executed: Mapped[bool | None] = mapped_column(nullable=True)
     source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

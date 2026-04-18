@@ -100,11 +100,43 @@ def test_rule_requires_all_specified_criteria_to_match() -> None:
     assert tier == GovernanceTier.approve  # default (high → approve)
 
 
-def test_poc_execution_criterion_cannot_match_today() -> None:
-    # patch_available / poc_execution rules are parsed but inert until their upstream signals exist.
+def test_poc_execution_true_matches_finding_with_poc_executed() -> None:
+    gov = GovernanceConfig(approve=[GovernanceRule(poc_execution=True)])
+    f = _finding(severity=Severity.medium)
+    f.poc_executed = True
+    assert decide_governance_tier(f, gov) == GovernanceTier.approve
+
+
+def test_poc_execution_false_matches_finding_without_poc() -> None:
+    gov = GovernanceConfig(auto_resolve=[GovernanceRule(poc_execution=False)])
+    f = _finding(severity=Severity.medium)
+    f.poc_executed = False
+    assert decide_governance_tier(f, gov) == GovernanceTier.auto_resolve
+
+
+def test_poc_execution_rule_skips_finding_with_no_signal() -> None:
     gov = GovernanceConfig(auto_resolve=[GovernanceRule(poc_execution=False)])
     tier = decide_governance_tier(_finding(severity=Severity.medium), gov)
-    # The rule is reserved and does not match anything yet → falls back to default (medium → approve).
+    assert tier == GovernanceTier.approve
+
+
+def test_patch_available_true_matches() -> None:
+    gov = GovernanceConfig(notify=[GovernanceRule(patch_available=True)])
+    f = _finding(severity=Severity.high)
+    f.patch_available = True
+    assert decide_governance_tier(f, gov) == GovernanceTier.notify
+
+
+def test_patch_available_false_matches() -> None:
+    gov = GovernanceConfig(approve=[GovernanceRule(patch_available=False)])
+    f = _finding(severity=Severity.high)
+    f.patch_available = False
+    assert decide_governance_tier(f, gov) == GovernanceTier.approve
+
+
+def test_patch_available_rule_skips_finding_with_no_signal() -> None:
+    gov = GovernanceConfig(notify=[GovernanceRule(patch_available=True)])
+    tier = decide_governance_tier(_finding(severity=Severity.high), gov)
     assert tier == GovernanceTier.approve
 
 
