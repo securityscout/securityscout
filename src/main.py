@@ -162,6 +162,31 @@ def create_app() -> FastAPI:
 
         app.state.enqueue_advisory = enqueue_advisory
 
+        async def enqueue_patch_oracle(
+            *,
+            repo_name: str,
+            finding_id: str,
+            workflow_run_id: str,
+            slack_channel_id: str,
+            slack_message_ts: str,
+        ) -> str | None:
+            job = await redis_pool.enqueue_job(
+                "process_patch_oracle_job",
+                repo_name=repo_name,
+                finding_id=finding_id,
+                workflow_run_id=workflow_run_id,
+                slack_channel_id=slack_channel_id,
+                slack_message_ts=slack_message_ts,
+            )
+            if job is None:
+                return None
+            if isinstance(job, str):
+                return job
+            jid = getattr(job, "job_id", None)
+            return str(jid) if jid is not None else None
+
+        app.state.enqueue_patch_oracle = enqueue_patch_oracle
+
         async with session_scope(session_factory) as session:
             await log_and_persist_config_loaded(session, app_config)
 

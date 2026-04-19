@@ -140,11 +140,16 @@ def test_finding_to_report_payload_maps_core_fields() -> None:
         workflow=WorkflowKind.advisory,
         source_ref="https://github.com/advisories/GHSA-TEST",
         severity=Severity.high,
-        status=FindingStatus.unconfirmed,
+        status=FindingStatus.confirmed_low,
         title="Test title",
         cve_id="CVE-2024-1",
         cwe_ids=["CWE-79"],
-        evidence={"ok": True},
+        poc_executed=True,
+        patch_available=True,
+        evidence={
+            "execution": {"excerpt": "exploit confirmed", "poc_type": "researcher-submitted"},
+            "oracle": {"patched_ref_candidates": ["1.2.3", "v1.2.3"]},
+        },
     )
     p = finding_to_report_payload(f)
     assert p.finding_id == fid
@@ -153,7 +158,11 @@ def test_finding_to_report_payload_maps_core_fields() -> None:
     assert p.cve_ids == ("CVE-2024-1",)
     assert p.cwe_ids == ("CWE-79",)
     assert p.evidence_excerpt is not None
-    assert '"ok": true' in p.evidence_excerpt
+    assert "exploit confirmed" in p.evidence_excerpt
+    assert p.poc_type_label == "[researcher-submitted]"
+    assert p.show_patch_oracle_button is True
+    assert p.execution_tier_badge is not None
+    assert "CONFIRMED_LOW" in (p.execution_tier_badge or "")
 
 
 def test_finding_to_report_payload_omits_evidence_when_not_serializable() -> None:
@@ -168,6 +177,26 @@ def test_finding_to_report_payload_omits_evidence_when_not_serializable() -> Non
     )
     p = finding_to_report_payload(f)
     assert p.evidence_excerpt is None
+
+
+def test_build_finding_blocks_patch_oracle_button_before_approval() -> None:
+    from tools.slack import ACTION_ID_RUN_PATCH_ORACLE
+
+    r = _sample_report(show_patch_oracle_button=True)
+    ctx = ApprovalButtonContext(
+        finding_id=uuid.UUID("11111111-2222-3333-4444-555555555555"),
+        workflow_run_id=uuid.UUID("66666666-7777-8888-9999-aaaaaaaaaaaa"),
+        repo_name="demo",
+    )
+    blocks = build_finding_blocks(
+        r,
+        approval_context=ctx,
+        patch_oracle_context=ctx,
+    )
+    actions = [b for b in blocks if b.get("type") == "actions"]
+    assert any(b.get("block_id") == "security_scout_patch_oracle" for b in actions)
+    oracle_block = next(b for b in actions if b.get("block_id") == "security_scout_patch_oracle")
+    assert oracle_block["elements"][0]["action_id"] == ACTION_ID_RUN_PATCH_ORACLE
 
 
 def test_build_finding_blocks_includes_dedup_section() -> None:

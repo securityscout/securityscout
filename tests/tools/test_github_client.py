@@ -91,7 +91,40 @@ async def test_fetch_repository_security_advisory_success() -> None:
         cvss_score_api=None,
         affected_package_name=None,
         affected_package_ecosystem=None,
+        patch_available=False,
+        first_patched_version=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_repository_security_advisory_extracts_patch_metadata() -> None:
+    payload = {
+        "ghsa_id": "GHSA-ABCD-EFGH-IJKL",
+        "summary": "Patched vuln",
+        "description": "d",
+        "severity": "medium",
+        "identifiers": [],
+        "cwes": [],
+        "published_at": None,
+        "updated_at": None,
+        "vulnerabilities": [
+            {
+                "package": {"ecosystem": "npm", "name": "left-pad"},
+                "vulnerable_version_range": "< 1.2.3",
+                "first_patched_version": "1.2.3",
+            },
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        adv = await gh.fetch_repository_security_advisory("acme", "app", "ghsa-abcd-efgh-ijkl")
+
+    assert adv.patch_available is True
+    assert adv.first_patched_version == "1.2.3"
 
 
 @pytest.mark.asyncio

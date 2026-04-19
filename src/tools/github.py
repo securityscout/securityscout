@@ -297,6 +297,23 @@ def _first_affected_package_from_payload(data: dict[str, Any]) -> tuple[str | No
     return None, None
 
 
+def _patch_fields_from_vulnerabilities(data: dict[str, Any]) -> tuple[bool, str | None]:
+    """Derive whether a fix version exists and the first patched version string."""
+    vulns = data.get("vulnerabilities")
+    if not isinstance(vulns, list):
+        return False, None
+    first: str | None = None
+    for raw in vulns:
+        if not isinstance(raw, dict):
+            continue
+        fpv = raw.get("first_patched_version")
+        if isinstance(fpv, str):
+            s = fpv.strip()
+            if s:
+                first = first or s
+    return first is not None, first
+
+
 def _advisory_from_payload(
     data: dict[str, Any],
     *,
@@ -324,6 +341,7 @@ def _advisory_from_payload(
     html_url = html if isinstance(html, str) else None
     cv_vec, cv_score = _cvss_vector_and_score_from_payload(data)
     pkg_name, pkg_eco = _first_affected_package_from_payload(data)
+    patch_ok, first_patched = _patch_fields_from_vulnerabilities(data)
 
     return AdvisoryData(
         ghsa_id=ghsa,
@@ -340,6 +358,8 @@ def _advisory_from_payload(
         cvss_score_api=cv_score,
         affected_package_name=pkg_name,
         affected_package_ecosystem=pkg_eco,
+        patch_available=patch_ok,
+        first_patched_version=first_patched,
     )
 
 

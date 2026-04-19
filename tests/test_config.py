@@ -330,6 +330,21 @@ def test_repo_config_accepted_risk_ttl_defaults_to_90() -> None:
         require_approval_for=["high"],
     )
     assert repo.accepted_risk_ttl_days == 90
+    assert repo.default_git_ref == "main"
+
+
+def test_repo_config_default_git_ref_can_be_master() -> None:
+    repo = RepoConfig(
+        name="svc",
+        github_org="dhis2",
+        github_repo="dhis2-core",
+        slack_channel="#c",
+        allowed_workflows=[],
+        notify_on_severity=["high"],
+        require_approval_for=["high"],
+        default_git_ref="master",
+    )
+    assert repo.default_git_ref == "master"
 
 
 def test_repo_config_accepted_risk_ttl_rejects_negative() -> None:

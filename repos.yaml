@@ -4,6 +4,8 @@ repos:
   - name: <REPO_NAME>
     github_org: <GITHUB_ORG>
     github_repo: <GITHUB_REPO>
+    # Optional. Git ref for sandbox clone when evidence has no oracle.vulnerable_ref (default: main).
+    # default_git_ref: master
     mode: observe
     slack_channel: <SLACK_CHANNEL>
     allowed_workflows: []

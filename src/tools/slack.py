@@ -15,7 +15,7 @@ from slack_sdk.models.blocks.basic_components import MarkdownTextObject, PlainTe
 from slack_sdk.models.blocks.block_elements import ButtonElement
 
 from exceptions import SecurityScoutError
-from models import Finding, KnownStatus
+from models import Finding, FindingStatus, KnownStatus
 
 __all__ = [
     "ACTION_ID_APPROVE",
@@ -24,9 +24,12 @@ __all__ = [
     "ACTION_ID_DEDUP_REOPEN",
     "ACTION_ID_DEDUP_RESOLVED",
     "ACTION_ID_ESCALATE",
+    "ACTION_ID_PREFLIGHT_CANCEL",
+    "ACTION_ID_PREFLIGHT_PROCEED",
     "ACTION_ID_REJECT",
     "ACTION_ID_RISK_REEVALUATE",
     "ACTION_ID_RISK_STILL_ACCEPTED",
+    "ACTION_ID_RUN_PATCH_ORACLE",
     "ApprovalButtonContext",
     "DedupMatchInfo",
     "FindingReportPayload",
@@ -50,6 +53,10 @@ ACTION_ID_DEDUP_RESOLVED = "security_scout:dedup_resolved"
 
 ACTION_ID_RISK_STILL_ACCEPTED = "security_scout:risk_still_accepted"
 ACTION_ID_RISK_REEVALUATE = "security_scout:risk_reevaluate"
+
+ACTION_ID_PREFLIGHT_PROCEED = "security_scout:preflight_proceed"
+ACTION_ID_PREFLIGHT_CANCEL = "security_scout:preflight_cancel"
+ACTION_ID_RUN_PATCH_ORACLE = "security_scout:run_patch_oracle"
 
 _LOG = structlog.get_logger(__name__)
 
@@ -155,6 +162,11 @@ class FindingReportPayload(BaseModel):
     poc_type_label: str | None = None
     reproduction_steps: str | None = None
     dedup: DedupMatchInfo | None = None
+    execution_tier_code: str | None = None
+    execution_tier_badge: str | None = None
+    preflight_score: float | None = None
+    preflight_indicator_lines: tuple[str, ...] = ()
+    show_patch_oracle_button: bool = False
 
 
 class SlackPostMessageResult(BaseModel):
@@ -222,6 +234,31 @@ def _plain_single_line(text: str) -> str:
     return _WS_RE.sub(" ", text.strip())
 
 
+_EXEC_TIER_DISPLAY: dict[FindingStatus, tuple[str, str]] = {
+    FindingStatus.confirmed_high: ("🟢 *CONFIRMED_HIGH*", "CONFIRMED_HIGH"),
+    FindingStatus.confirmed_low: ("🟡 *CONFIRMED_LOW*", "CONFIRMED_LOW"),
+    FindingStatus.unconfirmed: ("⚪ *UNCONFIRMED*", "UNCONFIRMED"),
+    FindingStatus.error: ("🔴 *ERROR*", "ERROR"),
+}
+
+
+def _execution_tier_badge(status: FindingStatus) -> tuple[str | None, str | None]:
+    row = _EXEC_TIER_DISPLAY.get(status)
+    if row is None:
+        return None, None
+    return row[0], row[1]
+
+
+def _poc_type_bracket(raw: str) -> str:
+    key = raw.strip().lower()
+    mapping = {
+        "researcher-submitted": "[researcher-submitted]",
+        "nuclei-template": "[nuclei-template]",
+        "llm-generated": "[LLM-generated]",
+    }
+    return mapping.get(key, f"[{raw.strip()}]")
+
+
 def finding_to_report_payload(finding: Finding) -> FindingReportPayload:
     cve_ids: tuple[str, ...] = (finding.cve_id,) if finding.cve_id else ()
     cwe_ids = tuple(finding.cwe_ids) if finding.cwe_ids else ()
@@ -237,16 +274,53 @@ def finding_to_report_payload(finding: Finding) -> FindingReportPayload:
     desc_excerpt: str | None = None
     if finding.description:
         desc_excerpt = _truncate(_plain_single_line(finding.description), _MAX_DESCRIPTION_EXCERPT)
+
+    ev_blob: dict[str, Any] = dict(finding.evidence) if finding.evidence else {}
+    raw_execution = ev_blob.get("execution")
+    execution: dict[str, Any] = raw_execution if isinstance(raw_execution, dict) else {}
+
     ev_excerpt: str | None = None
-    if finding.evidence:
-        try:
-            raw = json.dumps(finding.evidence, ensure_ascii=False)
-        except TypeError:
-            raw = None
-        except ValueError:
-            raw = None
-        if raw is not None:
-            ev_excerpt = _truncate(raw, _MAX_EVIDENCE_EXCERPT)
+    ex_txt = execution.get("excerpt")
+    if isinstance(ex_txt, str) and ex_txt.strip():
+        ev_excerpt = _truncate(_plain_single_line(ex_txt), _MAX_EVIDENCE_EXCERPT)
+
+    poc_type_label: str | None = None
+    pt = execution.get("poc_type")
+    if isinstance(pt, str) and pt.strip():
+        poc_type_label = _poc_type_bracket(pt)
+
+    preflight_score: float | None = None
+    preflight_lines: list[str] = []
+    pf = ev_blob.get("preflight")
+    if isinstance(pf, dict):
+        sc = pf.get("score")
+        if isinstance(sc, (int, float)):
+            preflight_score = float(sc)
+        inds = pf.get("indicators")
+        if isinstance(inds, list):
+            for item in inds[:25]:
+                if isinstance(item, dict):
+                    detail = item.get("detail")
+                    if isinstance(detail, str) and detail.strip():
+                        preflight_lines.append(detail.strip())
+
+    raw_oracle = ev_blob.get("oracle")
+    oracle: dict[str, Any] = raw_oracle if isinstance(raw_oracle, dict) else {}
+    cands = oracle.get("patched_ref_candidates")
+    has_patched_candidate = isinstance(cands, list) and any(isinstance(x, str) and x.strip() for x in cands)
+
+    show_patch_oracle = (
+        finding.poc_executed is True
+        and finding.status == FindingStatus.confirmed_low
+        and bool(finding.patch_available)
+        and has_patched_candidate
+    )
+
+    exec_badge: str | None = None
+    exec_code: str | None = None
+    if finding.poc_executed:
+        exec_badge, exec_code = _execution_tier_badge(finding.status)
+
     return FindingReportPayload(
         finding_id=finding.id,
         title=finding.title,
@@ -261,9 +335,14 @@ def finding_to_report_payload(finding: Finding) -> FindingReportPayload:
         cvss_vector=finding.cvss_vector,
         description_excerpt=desc_excerpt,
         evidence_excerpt=ev_excerpt,
-        poc_type_label=None,
+        poc_type_label=poc_type_label,
         reproduction_steps=finding.reproduction,
         dedup=dedup,
+        execution_tier_code=exec_code,
+        execution_tier_badge=exec_badge,
+        preflight_score=preflight_score,
+        preflight_indicator_lines=tuple(preflight_lines),
+        show_patch_oracle_button=show_patch_oracle,
     )
 
 
@@ -414,12 +493,48 @@ def _informational_context_block() -> ContextBlock:
     )
 
 
+def _build_preflight_review_actions_block(ctx: ApprovalButtonContext) -> ActionsBlock:
+    encoded = ctx.encode()
+    return ActionsBlock(
+        block_id="security_scout_preflight_review",
+        elements=[
+            ButtonElement(
+                text=PlainTextObject(text="Proceed with sandbox"),
+                action_id=ACTION_ID_PREFLIGHT_PROCEED,
+                style="primary",
+                value=encoded,
+            ),
+            ButtonElement(
+                text=PlainTextObject(text="Cancel PoC run"),
+                action_id=ACTION_ID_PREFLIGHT_CANCEL,
+                value=encoded,
+            ),
+        ],
+    )
+
+
+def _build_patch_oracle_actions_block(ctx: ApprovalButtonContext) -> ActionsBlock:
+    encoded = ctx.encode()
+    return ActionsBlock(
+        block_id="security_scout_patch_oracle",
+        elements=[
+            ButtonElement(
+                text=PlainTextObject(text="Run Patch Oracle"),
+                action_id=ACTION_ID_RUN_PATCH_ORACLE,
+                value=encoded,
+            ),
+        ],
+    )
+
+
 def build_finding_blocks(
     report: FindingReportPayload,
     *,
     workflow_run_id: uuid.UUID | None = None,
     approval_context: ApprovalButtonContext | None = None,
     informational: bool = False,
+    preflight_review_context: ApprovalButtonContext | None = None,
+    patch_oracle_context: ApprovalButtonContext | None = None,
 ) -> list[dict[str, Any]]:
     blocks: list[Any] = []
     sev_upper = _plain_single_line(report.severity).upper()
@@ -469,6 +584,20 @@ def build_finding_blocks(
     desc = _truncate(escape_slack_mrkdwn(desc_raw), _MAX_DESCRIPTION_EXCERPT) if desc_raw else "—"
     blocks.append(SectionBlock(text=MarkdownTextObject(text=f"*Description*\n{desc}")))
 
+    conf_line = report.execution_tier_badge or "_Sandbox not run yet — no execution confidence tier._"
+    blocks.append(SectionBlock(text=MarkdownTextObject(text=f"*PoC execution confidence*\n{conf_line}")))
+
+    if report.preflight_score is not None or report.preflight_indicator_lines:
+        pf_lines: list[str] = []
+        if report.preflight_score is not None:
+            pf_lines.append(f"*Pre-flight score:* {report.preflight_score:.2f}")
+        if report.preflight_indicator_lines:
+            pf_lines.append("*Pre-flight indicators:*")
+            for li in report.preflight_indicator_lines:
+                safe = escape_slack_mrkdwn(_truncate(_plain_single_line(li), 220))
+                pf_lines.append(f"• {safe}")
+        blocks.append(SectionBlock(text=MarkdownTextObject(text="\n".join(pf_lines))))
+
     ev_raw = report.evidence_excerpt
     ev = (
         _truncate(escape_slack_mrkdwn(ev_raw), _MAX_EVIDENCE_EXCERPT)
@@ -494,6 +623,12 @@ def build_finding_blocks(
 
     ctx = _footer_context_text(report, source_link, workflow_run_id)
     blocks.append(ContextBlock(elements=[MarkdownTextObject(text=ctx)]))
+
+    if preflight_review_context is not None:
+        blocks.append(_build_preflight_review_actions_block(preflight_review_context))
+
+    if patch_oracle_context is not None and report.show_patch_oracle_button:
+        blocks.append(_build_patch_oracle_actions_block(patch_oracle_context))
 
     if approval_context is not None:
         if report.dedup is not None and report.dedup.is_accepted_risk:
@@ -759,10 +894,32 @@ class SlackClient:
         workflow_run_id: uuid.UUID,
         approval_context: ApprovalButtonContext,
     ) -> SlackPostMessageResult:
+        oracle_ctx = approval_context if report.show_patch_oracle_button else None
         blocks = build_finding_blocks(
             report,
             workflow_run_id=workflow_run_id,
             approval_context=approval_context,
+            patch_oracle_context=oracle_ctx,
+        )
+        return await self._post_finding_message(
+            channel,
+            report,
+            workflow_run_id=workflow_run_id,
+            blocks=blocks,
+        )
+
+    async def send_preflight_review(
+        self,
+        channel: str,
+        report: FindingReportPayload,
+        *,
+        workflow_run_id: uuid.UUID,
+        review_context: ApprovalButtonContext,
+    ) -> SlackPostMessageResult:
+        blocks = build_finding_blocks(
+            report,
+            workflow_run_id=workflow_run_id,
+            preflight_review_context=review_context,
         )
         return await self._post_finding_message(
             channel,

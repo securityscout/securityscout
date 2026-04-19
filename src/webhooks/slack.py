@@ -30,6 +30,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from agents.approval import ApprovalContext, handle_slack_approval
 from agents.dedup import DedupContext, handle_slack_dedup_decision
+from agents.workflow_slack_handlers import handle_patch_oracle_request, handle_preflight_review_decision
 from config import AppConfig, Settings
 from db import session_scope
 from exceptions import SecurityScoutError
@@ -58,6 +59,9 @@ class SlackActionId(StrEnum):
     dedup_resolved = "security_scout:dedup_resolved"
     risk_still_accepted = "security_scout:risk_still_accepted"
     risk_reevaluate = "security_scout:risk_reevaluate"
+    preflight_proceed = "security_scout:preflight_proceed"
+    preflight_cancel = "security_scout:preflight_cancel"
+    run_patch_oracle = "security_scout:run_patch_oracle"
 
 
 _APPROVAL_ACTION_IDS: frozenset[SlackActionId] = frozenset(
@@ -73,6 +77,10 @@ _DEDUP_ACTION_IDS: frozenset[SlackActionId] = frozenset(
         SlackActionId.risk_reevaluate,
     },
 )
+_PREFLIGHT_ACTION_IDS: frozenset[SlackActionId] = frozenset(
+    {SlackActionId.preflight_proceed, SlackActionId.preflight_cancel},
+)
+_PATCH_ORACLE_ACTION_IDS: frozenset[SlackActionId] = frozenset({SlackActionId.run_patch_oracle})
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +229,10 @@ async def slack_webhook(request: Request) -> Response:
     )
 
     is_dedup = payload.action in _DEDUP_ACTION_IDS
+    is_preflight = payload.action in _PREFLIGHT_ACTION_IDS
+    is_patch_oracle = payload.action in _PATCH_ORACLE_ACTION_IDS
+    dedup_ctx: DedupContext | None = None
+    ctx: ApprovalContext | None = None
     try:
         if is_dedup:
             dedup_ctx = DedupContext.from_button_value(payload.button_value)
@@ -230,11 +242,50 @@ async def slack_webhook(request: Request) -> Response:
         log.warning("slack_webhook_bad_value", err=str(exc))
         raise HTTPException(status_code=400, detail="bad request") from exc
 
+    enqueue_advisory = getattr(request.app.state, "enqueue_advisory", None)
+    enqueue_patch_oracle = getattr(request.app.state, "enqueue_patch_oracle", None)
+
     async with (
         SlackClient(settings.slack_bot_token) as slack,
         session_scope(session_factory) as session,
     ):
-        if is_dedup:
+        if is_preflight:
+            if ctx is None:
+                log.error("slack_webhook_missing_context", branch="preflight")
+                raise HTTPException(status_code=500, detail="internal error")
+            await handle_preflight_review_decision(
+                session,
+                app_config,
+                slack,
+                ctx=ctx,
+                action_id=payload.action,
+                user_id=payload.user_id,
+                channel_id=payload.channel_id,
+                message_ts=payload.message_ts,
+                enqueue_advisory=enqueue_advisory,
+            )
+            handled_finding_id = ctx.finding_id
+            handled_run_id = ctx.workflow_run_id
+        elif is_patch_oracle:
+            if ctx is None:
+                log.error("slack_webhook_missing_context", branch="patch_oracle")
+                raise HTTPException(status_code=500, detail="internal error")
+            await handle_patch_oracle_request(
+                session,
+                app_config,
+                slack,
+                ctx=ctx,
+                user_id=payload.user_id,
+                channel_id=payload.channel_id,
+                message_ts=payload.message_ts,
+                enqueue_patch_oracle=enqueue_patch_oracle,
+            )
+            handled_finding_id = ctx.finding_id
+            handled_run_id = ctx.workflow_run_id
+        elif is_dedup:
+            if dedup_ctx is None:
+                log.error("slack_webhook_missing_context", branch="dedup")
+                raise HTTPException(status_code=500, detail="internal error")
             await handle_slack_dedup_decision(
                 session,
                 slack,
@@ -247,6 +298,9 @@ async def slack_webhook(request: Request) -> Response:
             handled_finding_id = dedup_ctx.finding_id
             handled_run_id = dedup_ctx.workflow_run_id
         else:
+            if ctx is None:
+                log.error("slack_webhook_missing_context", branch="approval")
+                raise HTTPException(status_code=500, detail="internal error")
             await handle_slack_approval(
                 session,
                 app_config,

@@ -84,6 +84,11 @@ def _has_expected_pattern(stdout: str, stderr: str) -> bool:
     return any(p.search(combined) for p in _SUCCESS_PATTERNS)
 
 
+def output_matches_success_patterns(stdout: str, stderr: str) -> bool:
+    """Public helper for patch-oracle differential checks (same patterns as tier assignment)."""
+    return _has_expected_pattern(stdout, stderr)
+
+
 def assign_confidence_tier(
     *,
     exit_code: int,
@@ -324,4 +329,5 @@ __all__ = [
     "assign_confidence_tier",
     "execute_nuclei",
     "execute_poc",
+    "output_matches_success_patterns",
 ]

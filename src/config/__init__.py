@@ -112,6 +112,8 @@ class RepoConfig(BaseModel):
     name: str
     github_org: str
     github_repo: str
+    # Git ref for sandbox / patch-oracle when finding evidence has no oracle.vulnerable_ref (e.g. master).
+    default_git_ref: str = "main"
     mode: RepoMode = RepoMode.observe
     slack_channel: str
     allowed_workflows: list[str]

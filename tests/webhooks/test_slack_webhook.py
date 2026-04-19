@@ -144,6 +144,115 @@ def test_parse_interactive_payload_requires_payload_field() -> None:
         parse_interactive_payload(b"other=thing")
 
 
+def test_assert_delivery_fresh_requires_timestamp_header() -> None:
+    with pytest.raises(SlackVerificationError, match="Timestamp"):
+        _PROVIDER.assert_delivery_fresh({}, now=_dt_from_epoch(time.time()))
+
+
+def test_parse_interactive_payload_rejects_invalid_utf8_body() -> None:
+    with pytest.raises(SlackVerificationError, match="invalid form"):
+        parse_interactive_payload(b"payload=\xff\xfe")
+
+
+def test_parse_interactive_payload_rejects_invalid_json() -> None:
+    body = urlencode({"payload": "not json"}).encode("utf-8")
+    with pytest.raises(SlackVerificationError, match="invalid payload JSON"):
+        parse_interactive_payload(body)
+
+
+def test_parse_interactive_payload_rejects_non_object_json() -> None:
+    body = urlencode({"payload": json.dumps(["x"])}).encode("utf-8")
+    with pytest.raises(SlackVerificationError, match="not a JSON object"):
+        parse_interactive_payload(body)
+
+
+def test_parse_interactive_payload_rejects_empty_actions() -> None:
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "U1"},
+        "container": {"message_ts": "1.0", "channel_id": "C1"},
+        "actions": [],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    with pytest.raises(SlackVerificationError, match="missing actions"):
+        parse_interactive_payload(body)
+
+
+def test_parse_interactive_payload_rejects_non_dict_action() -> None:
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "U1"},
+        "container": {"message_ts": "1.0", "channel_id": "C1"},
+        "actions": ["nope"],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    with pytest.raises(SlackVerificationError, match="malformed action entry"):
+        parse_interactive_payload(body)
+
+
+def test_parse_interactive_payload_rejects_bad_action_field_types() -> None:
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "U1"},
+        "container": {"message_ts": "1.0", "channel_id": "C1"},
+        "actions": [{"action_id": 1, "value": "v"}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    with pytest.raises(SlackVerificationError, match="malformed action fields"):
+        parse_interactive_payload(body)
+
+
+def test_parse_interactive_payload_rejects_missing_user() -> None:
+    payload = {
+        "type": "block_actions",
+        "container": {"message_ts": "1.0", "channel_id": "C1"},
+        "actions": [{"action_id": "security_scout:approve", "value": _encoded_button_value()}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    with pytest.raises(SlackVerificationError, match="missing user"):
+        parse_interactive_payload(body)
+
+
+def test_parse_interactive_payload_rejects_bad_user_id() -> None:
+    payload = {
+        "type": "block_actions",
+        "user": {"id": ""},
+        "container": {"message_ts": "1.0", "channel_id": "C1"},
+        "actions": [{"action_id": "security_scout:approve", "value": _encoded_button_value()}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    with pytest.raises(SlackVerificationError, match="missing user id"):
+        parse_interactive_payload(body)
+
+
+def test_parse_interactive_payload_takes_channel_id_from_channel_only() -> None:
+    value = _encoded_button_value()
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "U1"},
+        "container": {"message_ts": "9.9"},
+        "channel": {"id": "C-from-channel"},
+        "actions": [{"action_id": "security_scout:approve", "value": value}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    out = parse_interactive_payload(body)
+    assert out.channel_id == "C-from-channel"
+    assert out.message_ts == "9.9"
+
+
+def test_parse_interactive_payload_requires_channel_and_message_ts() -> None:
+    value = _encoded_button_value()
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "U1"},
+        "container": {},
+        "actions": [{"action_id": "security_scout:approve", "value": value}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    with pytest.raises(SlackVerificationError, match="missing channel or message_ts"):
+        parse_interactive_payload(body)
+
+
 @pytest.mark.parametrize(
     "action_id",
     [
@@ -156,6 +265,28 @@ def test_parse_interactive_payload_requires_payload_field() -> None:
     ],
 )
 def test_parse_interactive_payload_decodes_dedup_actions(action_id: str) -> None:
+    value = _encoded_button_value()
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "U01ABC"},
+        "container": {"message_ts": "1.0", "channel_id": "C1"},
+        "actions": [{"action_id": action_id, "value": value, "type": "button"}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    out = parse_interactive_payload(body)
+    assert out.action.value == action_id
+    assert out.button_value == value
+
+
+@pytest.mark.parametrize(
+    "action_id",
+    [
+        "security_scout:preflight_proceed",
+        "security_scout:preflight_cancel",
+        "security_scout:run_patch_oracle",
+    ],
+)
+def test_parse_interactive_payload_decodes_workflow_aux_actions(action_id: str) -> None:
     value = _encoded_button_value()
     payload = {
         "type": "block_actions",
