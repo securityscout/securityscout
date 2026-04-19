@@ -12,16 +12,31 @@ from arq.connections import RedisSettings
 from arq.typing import StartupShutdown, WorkerSettingsBase
 
 from agents.orchestrator import ScheduleRetryParams, run_advisory_workflow
+from agents.patch_oracle import run_patch_oracle_job
 from ai.anthropic_provider import create_provider
 from ai.provider import LLMProvider
 from config import Settings, configure_logging, load_app_config
 from db import create_engine, create_session_factory, session_scope
+from exceptions import SecurityScoutError
+from tools.docker_sandbox import SandboxBuildError
 from tools.issue_tracker import IssueTrackerCredentials
 from tools.rate_limiter import SlidingWindowRateLimiter
 from tools.scm.github import GitHubSCMProvider
-from tools.slack import SlackClient
+from tools.slack import SlackAPIError, SlackClient
 
 _LOG = structlog.get_logger(__name__)
+
+_MAX_PATCH_ORACLE_FAILURE_DETAIL = 400
+
+
+def _patch_oracle_failure_reply_text(exc: Exception) -> str:
+    name = type(exc).__name__
+    detail = str(exc).strip()
+    if not detail:
+        return f"Patch oracle failed: {name}"
+    if len(detail) > _MAX_PATCH_ORACLE_FAILURE_DETAIL:
+        detail = detail[: _MAX_PATCH_ORACLE_FAILURE_DETAIL - 1] + "…"
+    return f"Patch oracle failed ({name}): {detail}"
 
 
 async def startup(ctx: dict[Any, Any]) -> None:
@@ -118,9 +133,84 @@ async def process_advisory_workflow_job(
         )
 
 
+async def process_patch_oracle_job(
+    ctx: dict[str, Any],
+    *,
+    repo_name: str,
+    finding_id: str,
+    workflow_run_id: str,
+    slack_channel_id: str,
+    slack_message_ts: str,
+) -> None:
+    settings: Settings = ctx["settings"]
+    app_config = ctx["app_config"]
+    session_factory = ctx["session_factory"]
+
+    repo = next((r for r in app_config.repos.repos if r.name == repo_name), None)
+    if repo is None:
+        _LOG.error("patch_oracle_unknown_repo", repo_name=repo_name)
+        return
+
+    fid = uuid.UUID(finding_id)
+    wid = uuid.UUID(workflow_run_id)
+
+    async with (
+        GitHubSCMProvider(settings.github_pat) as scm,
+        SlackClient(settings.slack_bot_token) as slack,
+        session_scope(session_factory) as session,
+    ):
+        try:
+            _tier, summary = await run_patch_oracle_job(
+                session,
+                scm,
+                repo_slug=f"{repo.github_org}/{repo.github_repo}",
+                finding_id=fid,
+                workflow_run_id=wid,
+                container_socket=settings.container_socket,
+                default_git_ref=repo.default_git_ref,
+            )
+        except (RuntimeError, SecurityScoutError, SandboxBuildError) as exc:
+            _LOG.exception(
+                "patch_oracle_job_failed",
+                finding_id=finding_id,
+                workflow_run_id=workflow_run_id,
+                err=str(exc),
+            )
+            try:
+                await slack.post_thread_reply(
+                    slack_channel_id,
+                    thread_ts=slack_message_ts,
+                    text=_patch_oracle_failure_reply_text(exc),
+                    finding_id=finding_id,
+                    workflow_run_id=wid,
+                )
+            except SlackAPIError as reply_exc:
+                _LOG.warning(
+                    "patch_oracle_failure_reply_failed",
+                    err=str(reply_exc),
+                    finding_id=finding_id,
+                )
+            return
+
+        try:
+            await slack.post_thread_reply(
+                slack_channel_id,
+                thread_ts=slack_message_ts,
+                text=summary,
+                finding_id=finding_id,
+                workflow_run_id=wid,
+            )
+        except SlackAPIError as reply_exc:
+            _LOG.warning(
+                "patch_oracle_success_reply_failed",
+                err=str(reply_exc),
+                finding_id=finding_id,
+            )
+
+
 class WorkerSettings(WorkerSettingsBase):
     # Use REDIS_URL env (same as Settings.redis_url) so importing this module does not require all app secrets.
     redis_settings = RedisSettings.from_dsn(os.environ.get("REDIS_URL", "redis://localhost:6379"))
     on_startup: StartupShutdown | None = startup
     on_shutdown: StartupShutdown | None = shutdown
-    functions: Sequence[Any] = [process_advisory_workflow_job]
+    functions: Sequence[Any] = [process_advisory_workflow_job, process_patch_oracle_job]

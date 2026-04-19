@@ -187,6 +187,105 @@ class TestSlackWebhookE2E:
         assert finding.approved_at is not None
 
     @pytest.mark.asyncio
+    async def test_preflight_proceed_through_http_handler(self, e2e_app) -> None:
+        app, factory, finding_id, run_id = e2e_app
+
+        async with factory() as session:
+            run = await session.get(WorkflowRun, run_id)
+            finding = await session.get(Finding, finding_id)
+            assert run is not None
+            assert finding is not None
+            run.state = AdvisoryWorkflowState.awaiting_preflight_decision.value
+            finding.evidence = {
+                "ghsa_id": "GHSA-1234-5678-ABCD",
+                "advisory_source": "repository",
+            }
+            await session.commit()
+
+        enqueue = AsyncMock(return_value="job-preflight")
+        app.state.enqueue_advisory = enqueue
+
+        button_value = ApprovalButtonContext(
+            finding_id=finding_id,
+            workflow_run_id=run_id,
+            repo_name="demo",
+        ).encode()
+
+        body = _interactive_payload(SlackActionId.preflight_proceed.value, button_value)
+        sig, ts = _sign(body)
+
+        with patch("webhooks.slack.SlackClient") as mock_cls:
+            mock_slack = AsyncMock()
+            mock_slack.post_thread_reply = AsyncMock()
+            mock_cls.return_value = mock_slack
+            mock_slack.__aenter__ = AsyncMock(return_value=mock_slack)
+            mock_slack.__aexit__ = AsyncMock(return_value=None)
+
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/webhooks/slack",
+                    content=body,
+                    headers={
+                        "X-Slack-Signature": sig,
+                        "X-Slack-Request-Timestamp": ts,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+
+        assert resp.status_code == 200
+        enqueue.assert_awaited_once()
+
+        async with factory() as session:
+            run2 = await session.get(WorkflowRun, run_id)
+        assert run2 is not None
+        assert run2.state == AdvisoryWorkflowState.building_env.value
+
+    @pytest.mark.asyncio
+    async def test_run_patch_oracle_through_http_handler(self, e2e_app) -> None:
+        app, factory, finding_id, run_id = e2e_app
+
+        async with factory() as session:
+            finding = await session.get(Finding, finding_id)
+            assert finding is not None
+            finding.status = FindingStatus.confirmed_low
+            finding.poc_executed = True
+            finding.patch_available = True
+            finding.evidence = {"oracle": {"patched_ref_candidates": ["1.0.0"]}}
+            await session.commit()
+
+        enqueue_po = AsyncMock(return_value="job-oracle")
+        app.state.enqueue_patch_oracle = enqueue_po
+
+        button_value = ApprovalButtonContext(
+            finding_id=finding_id,
+            workflow_run_id=run_id,
+            repo_name="demo",
+        ).encode()
+        body = _interactive_payload(SlackActionId.run_patch_oracle.value, button_value)
+        sig, ts = _sign(body)
+
+        with patch("webhooks.slack.SlackClient") as mock_cls:
+            mock_slack = AsyncMock()
+            mock_slack.post_thread_reply = AsyncMock()
+            mock_cls.return_value = mock_slack
+            mock_slack.__aenter__ = AsyncMock(return_value=mock_slack)
+            mock_slack.__aexit__ = AsyncMock(return_value=None)
+
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/webhooks/slack",
+                    content=body,
+                    headers={
+                        "X-Slack-Signature": sig,
+                        "X-Slack-Request-Timestamp": ts,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+
+        assert resp.status_code == 200
+        enqueue_po.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_reject_through_http_handler(self, e2e_app) -> None:
         """Reject action → finding marked false_positive."""
         app, factory, finding_id, run_id = e2e_app

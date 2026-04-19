@@ -3,15 +3,38 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
-from worker import WorkerSettings, process_advisory_workflow_job, shutdown, startup
+from models import FindingStatus
+from tools.slack import SlackAPIError
+from worker import (
+    WorkerSettings,
+    _patch_oracle_failure_reply_text,
+    process_advisory_workflow_job,
+    process_patch_oracle_job,
+    shutdown,
+    startup,
+)
+
+
+def test_patch_oracle_failure_reply_text_includes_exception_detail() -> None:
+    text = _patch_oracle_failure_reply_text(RuntimeError("clone failed"))
+    assert "Patch oracle failed" in text
+    assert "RuntimeError" in text
+    assert "clone failed" in text
+
+
+def test_patch_oracle_failure_reply_text_empty_message_uses_type_only() -> None:
+    text = _patch_oracle_failure_reply_text(RuntimeError())
+    assert text == "Patch oracle failed: RuntimeError"
 
 
 def test_worker_settings_registers_advisory_job() -> None:
     assert process_advisory_workflow_job in WorkerSettings.functions
+    assert process_patch_oracle_job in WorkerSettings.functions
     assert WorkerSettings.on_startup is not None
     assert WorkerSettings.on_shutdown is not None
 
@@ -100,6 +123,310 @@ async def test_process_advisory_workflow_job_invalid_source_returns(
         await process_advisory_workflow_job(
             ctx, repo_name="demo", ghsa_id="GHSA-AAAA-BBBB-CCCC", advisory_source="other"
         )
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_process_patch_oracle_job_unknown_repo_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'po.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+
+    ctx: dict[str, Any] = {}
+    await startup(ctx)
+    try:
+        await process_patch_oracle_job(
+            ctx,
+            repo_name="missing",
+            finding_id="00000000-0000-0000-0000-000000000001",
+            workflow_run_id="00000000-0000-0000-0000-000000000002",
+            slack_channel_id="C1",
+            slack_message_ts="1.0",
+        )
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_process_patch_oracle_job_success_posts_thread_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'po2.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+
+    ctx: dict[str, Any] = {}
+    await startup(ctx)
+    try:
+        mock_slack = AsyncMock()
+        mock_slack.post_thread_reply = AsyncMock()
+        mock_slack.__aenter__ = AsyncMock(return_value=mock_slack)
+        mock_slack.__aexit__ = AsyncMock(return_value=None)
+        mock_scm = AsyncMock()
+        mock_scm.__aenter__ = AsyncMock(return_value=mock_scm)
+        mock_scm.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch("worker.run_patch_oracle_job", new_callable=AsyncMock) as mock_oracle,
+            patch("worker.SlackClient", return_value=mock_slack),
+            patch("worker.GitHubSCMProvider", return_value=mock_scm),
+        ):
+            mock_oracle.return_value = (FindingStatus.confirmed_high, "Patch oracle complete.")
+            await process_patch_oracle_job(
+                ctx,
+                repo_name="demo",
+                finding_id="00000000-0000-0000-0000-000000000011",
+                workflow_run_id="00000000-0000-0000-0000-000000000022",
+                slack_channel_id="C1",
+                slack_message_ts="1.0",
+            )
+        mock_oracle.assert_awaited_once()
+        assert mock_oracle.call_args.kwargs.get("default_git_ref") == "main"
+        mock_slack.post_thread_reply.assert_awaited_once()
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_process_patch_oracle_job_passes_custom_default_git_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n"
+        "    default_git_ref: master\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'po2b.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+
+    ctx: dict[str, Any] = {}
+    await startup(ctx)
+    try:
+        mock_slack = AsyncMock()
+        mock_slack.post_thread_reply = AsyncMock()
+        mock_slack.__aenter__ = AsyncMock(return_value=mock_slack)
+        mock_slack.__aexit__ = AsyncMock(return_value=None)
+        mock_scm = AsyncMock()
+        mock_scm.__aenter__ = AsyncMock(return_value=mock_scm)
+        mock_scm.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch("worker.run_patch_oracle_job", new_callable=AsyncMock) as mock_oracle,
+            patch("worker.SlackClient", return_value=mock_slack),
+            patch("worker.GitHubSCMProvider", return_value=mock_scm),
+        ):
+            mock_oracle.return_value = (FindingStatus.confirmed_high, "done")
+            await process_patch_oracle_job(
+                ctx,
+                repo_name="demo",
+                finding_id="00000000-0000-0000-0000-000000000011",
+                workflow_run_id="00000000-0000-0000-0000-000000000022",
+                slack_channel_id="C1",
+                slack_message_ts="1.0",
+            )
+        assert mock_oracle.call_args.kwargs.get("default_git_ref") == "master"
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_process_patch_oracle_job_failure_posts_error_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'po3.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+
+    ctx: dict[str, Any] = {}
+    await startup(ctx)
+    try:
+        mock_slack = AsyncMock()
+        mock_slack.post_thread_reply = AsyncMock()
+        mock_slack.__aenter__ = AsyncMock(return_value=mock_slack)
+        mock_slack.__aexit__ = AsyncMock(return_value=None)
+        mock_scm = AsyncMock()
+        mock_scm.__aenter__ = AsyncMock(return_value=mock_scm)
+        mock_scm.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch("worker.run_patch_oracle_job", new_callable=AsyncMock) as mock_oracle,
+            patch("worker.SlackClient", return_value=mock_slack),
+            patch("worker.GitHubSCMProvider", return_value=mock_scm),
+        ):
+            mock_oracle.side_effect = RuntimeError("clone failed")
+            await process_patch_oracle_job(
+                ctx,
+                repo_name="demo",
+                finding_id="00000000-0000-0000-0000-000000000033",
+                workflow_run_id="00000000-0000-0000-0000-000000000044",
+                slack_channel_id="C1",
+                slack_message_ts="1.0",
+            )
+        mock_slack.post_thread_reply.assert_awaited_once()
+        err_text = mock_slack.post_thread_reply.call_args.kwargs["text"]
+        assert "Patch oracle failed" in err_text
+        assert "clone failed" in err_text
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_process_patch_oracle_job_success_reply_slack_error_is_logged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'po4.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+
+    ctx: dict[str, Any] = {}
+    await startup(ctx)
+    try:
+        mock_slack = AsyncMock()
+        mock_slack.post_thread_reply = AsyncMock(
+            side_effect=SlackAPIError("rate limited", is_transient=True, slack_error_code="rate_limited"),
+        )
+        mock_slack.__aenter__ = AsyncMock(return_value=mock_slack)
+        mock_slack.__aexit__ = AsyncMock(return_value=None)
+        mock_scm = AsyncMock()
+        mock_scm.__aenter__ = AsyncMock(return_value=mock_scm)
+        mock_scm.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch("worker.run_patch_oracle_job", new_callable=AsyncMock) as mock_oracle,
+            patch("worker.SlackClient", return_value=mock_slack),
+            patch("worker.GitHubSCMProvider", return_value=mock_scm),
+        ):
+            mock_oracle.return_value = (FindingStatus.confirmed_high, "done")
+            await process_patch_oracle_job(
+                ctx,
+                repo_name="demo",
+                finding_id="00000000-0000-0000-0000-000000000055",
+                workflow_run_id="00000000-0000-0000-0000-000000000066",
+                slack_channel_id="C1",
+                slack_message_ts="1.0",
+            )
+        mock_oracle.assert_awaited_once()
+        mock_slack.post_thread_reply.assert_awaited_once()
+    finally:
+        await shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_process_patch_oracle_job_failure_reply_slack_error_is_logged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "repos.yaml"
+    manifest.write_text(
+        "repos:\n"
+        "  - name: demo\n"
+        "    github_org: acme\n"
+        "    github_repo: app\n"
+        "    slack_channel: '#sec'\n"
+        "    allowed_workflows: []\n"
+        "    notify_on_severity: [high]\n"
+        "    require_approval_for: [critical]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'po5.db'}")
+    monkeypatch.setenv("REPOS_CONFIG_PATH", str(manifest))
+    monkeypatch.setenv("GITHUB_PAT", "pat")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+
+    ctx: dict[str, Any] = {}
+    await startup(ctx)
+    try:
+        mock_slack = AsyncMock()
+        mock_slack.post_thread_reply = AsyncMock(
+            side_effect=SlackAPIError("rate limited", is_transient=True, slack_error_code="rate_limited"),
+        )
+        mock_slack.__aenter__ = AsyncMock(return_value=mock_slack)
+        mock_slack.__aexit__ = AsyncMock(return_value=None)
+        mock_scm = AsyncMock()
+        mock_scm.__aenter__ = AsyncMock(return_value=mock_scm)
+        mock_scm.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch("worker.run_patch_oracle_job", new_callable=AsyncMock) as mock_oracle,
+            patch("worker.SlackClient", return_value=mock_slack),
+            patch("worker.GitHubSCMProvider", return_value=mock_scm),
+        ):
+            mock_oracle.side_effect = RuntimeError("clone failed")
+            await process_patch_oracle_job(
+                ctx,
+                repo_name="demo",
+                finding_id="00000000-0000-0000-0000-000000000077",
+                workflow_run_id="00000000-0000-0000-0000-000000000088",
+                slack_channel_id="C1",
+                slack_message_ts="1.0",
+            )
+        mock_oracle.assert_awaited_once()
+        mock_slack.post_thread_reply.assert_awaited_once()
     finally:
         await shutdown(ctx)
 

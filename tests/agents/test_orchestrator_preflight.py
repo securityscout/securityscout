@@ -211,7 +211,7 @@ async def test_preflight_suspicious_parks_workflow(db_session, mocker) -> None:
             ghsa_id="GHSA-TEST-ABCD-EFGH",
         )
 
-    assert run.state == AdvisoryWorkflowState.pre_flight_suspicious.value
+    assert run.state == AdvisoryWorkflowState.awaiting_preflight_decision.value
     # Not terminal — completed_at stays None
     assert run.completed_at is None
 

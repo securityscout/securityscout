@@ -522,8 +522,19 @@ async def run_advisory_triage(
     title = advisory.summary.strip() or ghsa
     desc_sanitised = sanitize_text(advisory.description, max_chars=32_768)
 
+    patched_candidates: list[str] = []
+    if advisory.first_patched_version:
+        v = advisory.first_patched_version.strip()
+        if v:
+            patched_candidates = [v]
+            if not v.lower().startswith("v"):
+                tagged = f"v{v}"
+                if tagged not in patched_candidates:
+                    patched_candidates.append(tagged)
+
     evidence: dict[str, Any] = {
         "ghsa_id": ghsa,
+        "advisory_source": advisory_source,
         "exploitation_inferred": exploitation,
         "dependency_health": {
             "github_contributors_upper_bound": health.github_contributors_upper_bound,
@@ -534,6 +545,10 @@ async def run_advisory_triage(
             "osv_query_skipped_reason": health.osv_query_skipped_reason,
         },
         "dedup_matches": [m.model_dump(mode="json") for m in dedup_matches],
+        "oracle": {
+            "vulnerable_ref": repo.default_git_ref,
+            "patched_ref_candidates": patched_candidates,
+        },
     }
 
     cwe_list = list(advisory.cwe_ids) if advisory.cwe_ids else None
@@ -556,6 +571,7 @@ async def run_advisory_triage(
         title=title[:1024],
         description=desc_sanitised,
         evidence=evidence,
+        patch_available=advisory.patch_available,
     )
     session.add(row)
     await session.flush()

@@ -50,6 +50,7 @@ class AdvisoryWorkflowState(StrEnum):
     triage_complete = "triage_complete"
     pre_flight = "pre_flight"
     pre_flight_suspicious = "pre_flight_suspicious"
+    awaiting_preflight_decision = "awaiting_preflight_decision"
     pre_flight_blocked = "pre_flight_blocked"
     building_env = "building_env"
     executing_sandbox = "executing_sandbox"
@@ -575,23 +576,91 @@ async def run_advisory_workflow(
             return run
 
         if preflight_result.verdict == PreflightVerdict.SUSPICIOUS:
-            run.state = AdvisoryWorkflowState.pre_flight_suspicious.value
+            ev_pf = dict(finding.evidence or {})
+            ev_pf["preflight"] = {
+                "score": preflight_result.score,
+                "indicators": [
+                    {
+                        "category": ind.category,
+                        "pattern": ind.pattern,
+                        "severity_weight": ind.severity_weight,
+                        "detail": ind.detail,
+                    }
+                    for ind in preflight_result.indicators
+                ],
+            }
+            finding.evidence = ev_pf
+            await session.commit()
+
+            log.info(
+                "preflight_suspicious",
+                metric_name="preflight_verdict_total",
+                verdict="suspicious",
+                score=preflight_result.score,
+                workflow_run_id=str(run_stable_id),
+                finding_id=str(finding.id),
+            )
+
+            report_pf = finding_to_report_payload(finding)
+            review_ctx = ApprovalButtonContext(
+                finding_id=finding.id,
+                workflow_run_id=run_stable_id,
+                repo_name=repo.name,
+            )
+            try:
+                await slack.send_preflight_review(
+                    repo.slack_channel,
+                    report_pf,
+                    workflow_run_id=run_stable_id,
+                    review_context=review_ctx,
+                )
+            except (SlackAPIError, SlackMalformedResponseError) as e:
+                opened = breaker.record_failure("slack")
+                if opened:
+                    await _append_action_log(
+                        session,
+                        workflow_run_id=run_stable_id,
+                        agent="orchestrator",
+                        tool_name="circuit_breaker",
+                        tool_inputs={"api": "slack", "event": "opened"},
+                        tool_output=f"pause_seconds={breaker.PAUSE_SEC}",
+                    )
+                run = await _require_run(
+                    session,
+                    run_stable_id,
+                    missing_message="workflow run missing after preflight Slack failure",
+                )
+                run.state = AdvisoryWorkflowState.pre_flight_suspicious.value
+                await session.commit()
+                log.warning(
+                    "preflight_slack_failed",
+                    workflow_run_id=str(run_stable_id),
+                    err=str(e),
+                )
+                await _best_effort_error_slack(
+                    slack,
+                    repo.slack_channel,
+                    title="PoC flagged as suspicious — Slack delivery failed",
+                    detail=f"Score {preflight_result.score:.2f}: "
+                    + ", ".join(i.detail for i in preflight_result.indicators[:5]),
+                    workflow_run_id=run_stable_id,
+                    finding_id=str(finding.id),
+                )
+                return run
+
+            run = await _require_run(
+                session,
+                run_stable_id,
+                missing_message="workflow run missing after preflight review Slack",
+            )
+            run.state = AdvisoryWorkflowState.awaiting_preflight_decision.value
             await session.commit()
             log.info(
                 "workflow_state_transition",
                 metric_name="workflow_state_current",
                 from_state=AdvisoryWorkflowState.pre_flight.value,
-                to_state=AdvisoryWorkflowState.pre_flight_suspicious.value,
+                to_state=AdvisoryWorkflowState.awaiting_preflight_decision.value,
                 workflow_run_id=str(run_stable_id),
-            )
-            await _best_effort_error_slack(
-                slack,
-                repo.slack_channel,
-                title="PoC flagged as suspicious — awaiting manual review",
-                detail=f"Score {preflight_result.score:.2f}: "
-                + ", ".join(i.detail for i in preflight_result.indicators[:5]),
-                workflow_run_id=run_stable_id,
-                finding_id=str(finding.id),
             )
             return run
 
@@ -1033,12 +1102,20 @@ async def _run_sandbox_phase_inner(
 
     run = await _require_run(session, run_stable_id, missing_message="run missing in sandbox phase")
 
+    oracle_ev = (finding.evidence or {}).get("oracle")
+    # Default from repos.yaml when triage did not set evidence.oracle.vulnerable_ref.
+    clone_ref = repo.default_git_ref
+    if isinstance(oracle_ev, dict):
+        vr = oracle_ev.get("vulnerable_ref")
+        if isinstance(vr, str) and vr.strip():
+            clone_ref = vr.strip()
+
     # --- Build environment ---
     try:
         env_result = await build_environment(
             scm,
             repo_slug=repo_slug,
-            ref=finding.source_ref.split("@")[-1] if "@" in finding.source_ref else "HEAD",
+            ref=clone_ref,
             work_dir=effective_work_dir,
             container_socket=container_socket,
         )
@@ -1270,13 +1347,15 @@ async def _run_sandbox_phase_inner(
 
     finding.status = exec_result.confidence_tier
     finding.poc_executed = True
-    finding.evidence = {
+    merged_evidence = dict(finding.evidence or {})
+    merged_evidence["execution"] = {
         "excerpt": exec_result.evidence_excerpt,
         "exit_code": exec_result.exit_code,
         "elapsed_seconds": exec_result.elapsed_seconds,
         "poc_type": exec_result.poc_type.value,
         "timed_out": exec_result.timed_out,
     }
+    finding.evidence = merged_evidence
     await session.commit()
 
     run = await _require_run(session, run_stable_id, missing_message="run missing after sandbox exec")

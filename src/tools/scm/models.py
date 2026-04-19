@@ -37,6 +37,8 @@ class AdvisoryData(BaseModel):
     cvss_score_api: float | None = None
     affected_package_name: str | None = None
     affected_package_ecosystem: str | None = None
+    patch_available: bool = False
+    first_patched_version: str | None = None
 
 
 class PullRequestInfo(BaseModel):
