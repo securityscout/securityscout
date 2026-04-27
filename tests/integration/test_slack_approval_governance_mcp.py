@@ -130,6 +130,7 @@ def _app_config(
 async def _make_finding(session: object, *_a: object, **_k: object) -> Finding:
     f = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-TEST",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,
@@ -145,6 +146,7 @@ async def _make_finding(session: object, *_a: object, **_k: object) -> Finding:
 async def _make_finding_low(session: object, *_a: object, **_k: object) -> Finding:
     f = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-LOW",
         severity=Severity.low,
         ssvc_action=SSVCAction.track,
@@ -160,6 +162,7 @@ async def _make_finding_low(session: object, *_a: object, **_k: object) -> Findi
 async def _make_finding_informational(session: object, *_a: object, **_k: object) -> Finding:
     f = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-INFO",
         severity=Severity.informational,
         ssvc_action=SSVCAction.track,
@@ -175,6 +178,7 @@ async def _make_finding_informational(session: object, *_a: object, **_k: object
 async def _make_finding_critical(session: object, *_a: object, **_k: object) -> Finding:
     f = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-CRIT",
         severity=Severity.critical,
         ssvc_action=SSVCAction.immediate,
@@ -713,6 +717,7 @@ class TestMcpReadOnlyPopulatedDB:
         async with factory() as session:
             critical = Finding(
                 workflow=WorkflowKind.advisory,
+                repo_name="acme/app",
                 source_ref="acme/app GHSA-CRIT-1111-2222",
                 severity=Severity.critical,
                 ssvc_action=SSVCAction.immediate,
@@ -729,6 +734,7 @@ class TestMcpReadOnlyPopulatedDB:
 
             high = Finding(
                 workflow=WorkflowKind.advisory,
+                repo_name="acme/app",
                 source_ref="acme/app GHSA-HIGH-3333-4444",
                 severity=Severity.high,
                 ssvc_action=SSVCAction.act,
@@ -744,6 +750,7 @@ class TestMcpReadOnlyPopulatedDB:
 
             low = Finding(
                 workflow=WorkflowKind.advisory,
+                repo_name="other/repo",
                 source_ref="other/repo GHSA-LOW-5555-6666",
                 severity=Severity.low,
                 ssvc_action=SSVCAction.track,
@@ -755,6 +762,7 @@ class TestMcpReadOnlyPopulatedDB:
 
             approved = Finding(
                 workflow=WorkflowKind.advisory,
+                repo_name="acme/app",
                 source_ref="acme/app GHSA-DONE-7777-8888",
                 severity=Severity.high,
                 ssvc_action=SSVCAction.act,

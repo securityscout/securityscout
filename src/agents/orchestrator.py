@@ -172,10 +172,13 @@ async def run_advisory_workflow(
     needs_triage: bool
     run_stable_id: uuid.UUID
 
+    repo_slug = f"{repo.github_org}/{repo.github_repo}".lower()
+
     if resume_workflow_run_id is None:
         workflow_started_at = _now_utc()
         run = WorkflowRun(
             workflow_type=WorkflowKind.advisory,
+            repo_name=repo_slug,
             state=AdvisoryWorkflowState.received.value,
             retry_count=0,
             finding_id=None,
@@ -226,6 +229,8 @@ async def run_advisory_workflow(
         ):
             msg = f"cannot resume from state {loaded.state!r}"
             raise RuntimeError(msg)
+        if loaded.repo_name is None:
+            loaded.repo_name = repo_slug
         run_stable_id = loaded.id
         needs_triage = loaded.state == AdvisoryWorkflowState.triaging.value
 
@@ -1098,7 +1103,7 @@ async def _run_sandbox_phase_inner(
     container_socket: str,
     schedule_retry: Callable[[ScheduleRetryParams], Awaitable[None]] | None,
 ) -> ExecutionResult | None:
-    repo_slug = f"{repo.github_org}/{repo.github_repo}"
+    repo_slug = f"{repo.github_org}/{repo.github_repo}".lower()
 
     run = await _require_run(session, run_stable_id, missing_message="run missing in sandbox phase")
 

@@ -354,6 +354,7 @@ async def test_run_advisory_triage_flags_known_accepted_risk_when_history_matche
     prior = Finding(
         id=uuid.uuid4(),
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-PRIOR",
         severity=Severity.high,
         status=FindingStatus.accepted_risk,
@@ -404,6 +405,7 @@ async def test_run_advisory_triage_does_not_flag_accepted_risk_when_ttl_exceeded
     prior = Finding(
         id=uuid.uuid4(),
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-PRIOR",
         severity=Severity.high,
         status=FindingStatus.accepted_risk,

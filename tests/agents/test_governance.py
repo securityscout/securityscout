@@ -14,6 +14,7 @@ def _finding(
 ) -> Finding:
     return Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://example/advisory",
         severity=severity,
         ssvc_action=ssvc_action,

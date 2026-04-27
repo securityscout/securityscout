@@ -217,7 +217,7 @@ def create_mcp_server(
         """List findings for a repository, optionally filtered by severity or status.
 
         Args:
-            repo: Source reference prefix to match (e.g. "owner/repo").
+            repo: GitHub ``owner/repo`` slug (compared case-insensitively; stored canonical lowercase).
             severity: Filter by severity level (critical, high, medium, low, informational).
             status: Filter by finding status (confirmed_high, confirmed_low, unconfirmed, false_positive, accepted_risk).
             limit: Maximum number of results (1-200, default 50).
@@ -239,7 +239,8 @@ def create_mcp_server(
                 msg = f"invalid status: {status!r} — use one of: {valid}"
                 raise ValueError(msg) from None
 
-        stmt = select(Finding).where(Finding.source_ref.contains(repo))
+        repo_key = repo.strip().lower()
+        stmt = select(Finding).where(Finding.repo_name == repo_key)
 
         if severity is not None:
             stmt = stmt.where(Finding.severity == Severity(severity.lower()))

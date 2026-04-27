@@ -149,6 +149,7 @@ async def test_scout_historical_tier1_cve(db_session) -> None:
     finding = Finding(
         id=fid,
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="GHSA-abcd-efgh-ijkl",
         severity=Severity.high,
         title="Prior",
@@ -180,6 +181,7 @@ async def test_scout_historical_excludes_finding(db_session) -> None:
     finding = Finding(
         id=fid,
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="GHSA-abcd-efgh-ijkl",
         severity=Severity.high,
         title="Prior",
@@ -202,11 +204,96 @@ async def test_scout_historical_excludes_finding(db_session) -> None:
 
 
 @pytest.mark.asyncio
+async def test_scout_historical_tier1_cve_skips_code_audit_rows(db_session) -> None:
+    cve = "CVE-2024-1000"
+    audit_id = uuid.uuid4()
+    advisory_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            Finding(
+                id=audit_id,
+                workflow=WorkflowKind.code_audit,
+                repo_name="acme/app",
+                source_ref="https://example.com/pr/1",
+                severity=Severity.high,
+                title="SAST hit",
+                cve_id=cve,
+            ),
+            Finding(
+                id=advisory_id,
+                workflow=WorkflowKind.advisory,
+                repo_name="acme/app",
+                source_ref="https://github.com/advisories/GHSA-xxxx",
+                severity=Severity.high,
+                title="Advisory",
+                cve_id=cve,
+            ),
+        ],
+    )
+    await db_session.commit()
+
+    adapter = ScoutHistoricalAdapter(db_session, repo_slug="acme/app")
+    matches = await adapter.search_known_vulnerability(
+        cve,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [m.issue_id for m in matches] == [str(advisory_id)]
+
+
+@pytest.mark.asyncio
+async def test_scout_historical_tier1_ghsa_scoped_to_repo(db_session) -> None:
+    ghsa = "GHSA-ABCD-EFGH-IJKL"
+    other = uuid.uuid4()
+    mine = uuid.uuid4()
+    db_session.add_all(
+        [
+            Finding(
+                id=other,
+                workflow=WorkflowKind.advisory,
+                repo_name="other/other",
+                source_ref=f"https://github.com/advisories/{ghsa}",
+                severity=Severity.medium,
+                title="Other repo",
+                evidence={"ghsa_id": ghsa},
+            ),
+            Finding(
+                id=mine,
+                workflow=WorkflowKind.advisory,
+                repo_name="acme/app",
+                source_ref=f"https://github.com/advisories/{ghsa}",
+                severity=Severity.medium,
+                title="This repo",
+                evidence={"ghsa_id": ghsa},
+            ),
+        ],
+    )
+    await db_session.commit()
+
+    adapter = ScoutHistoricalAdapter(db_session, repo_slug="acme/app")
+    matches = await adapter.search_known_vulnerability(
+        None,
+        ghsa,
+        None,
+        None,
+        None,
+        None,
+    )
+
+    assert [m.issue_id for m in matches] == [str(mine)]
+
+
+@pytest.mark.asyncio
 async def test_scout_historical_tier1_ghsa_source_ref(db_session) -> None:
     fid = uuid.uuid4()
     finding = Finding(
         id=fid,
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-ABCD-EFGH-IJKL",
         severity=Severity.medium,
         title="Old GHSA",
@@ -235,6 +322,7 @@ async def test_scout_historical_tier2_cwe_when_no_tier1(db_session) -> None:
     finding = Finding(
         id=fid,
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://example.com/x",
         severity=Severity.high,
         title="CWE overlap",
@@ -269,6 +357,7 @@ async def test_run_dedup_checks_dedupes_and_logs_metrics(
     finding = Finding(
         id=fid,
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="GHSA-abcd-efgh-ijkl",
         severity=Severity.high,
         title="Prior",

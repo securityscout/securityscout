@@ -109,6 +109,17 @@ def _finding_has_cwe(row: Finding, cwe: str) -> bool:
     return any(_normalise_cwe_token(x) == want for x in ids)
 
 
+def _finding_has_ghsa(row: Finding, ghsa: str) -> bool:
+    ev = row.evidence
+    if isinstance(ev, dict):
+        raw = ev.get("ghsa_id")
+        if isinstance(raw, str):
+            n = _try_normalise_ghsa(raw)
+            if n is not None and n == ghsa:
+                return True
+    return ghsa.upper() in row.source_ref.upper()
+
+
 class TrackerMatch(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -225,8 +236,12 @@ async def _scout_append_cve_matches(
     cve: str,
     seen_ids: set[uuid.UUID],
     matches: list[TrackerMatch],
+    *,
+    repo_slug: str | None,
 ) -> None:
-    stmt = select(Finding).where(Finding.cve_id == cve)
+    stmt = select(Finding).where(Finding.cve_id == cve, Finding.workflow == WorkflowKind.advisory)
+    if repo_slug is not None:
+        stmt = stmt.where(Finding.repo_name == repo_slug)
     if exclude is not None:
         stmt = stmt.where(Finding.id != exclude)
     result = await session.execute(stmt)
@@ -243,13 +258,17 @@ async def _scout_append_ghsa_matches(
     ghsa: str,
     seen_ids: set[uuid.UUID],
     matches: list[TrackerMatch],
+    *,
+    repo_slug: str | None,
 ) -> None:
     stmt = select(Finding).where(Finding.workflow == WorkflowKind.advisory)
+    if repo_slug is not None:
+        stmt = stmt.where(Finding.repo_name == repo_slug)
     if exclude is not None:
         stmt = stmt.where(Finding.id != exclude)
     result = await session.execute(stmt)
     for row in result.scalars():
-        if ghsa.upper() not in row.source_ref.upper():
+        if not _finding_has_ghsa(row, ghsa):
             continue
         if row.id in seen_ids:
             continue
@@ -263,8 +282,12 @@ async def _scout_append_cwe_matches(
     cwe_token: str,
     seen_ids: set[uuid.UUID],
     matches: list[TrackerMatch],
+    *,
+    repo_slug: str | None,
 ) -> None:
     stmt = select(Finding).where(Finding.workflow == WorkflowKind.advisory)
+    if repo_slug is not None:
+        stmt = stmt.where(Finding.repo_name == repo_slug)
     if exclude is not None:
         stmt = stmt.where(Finding.id != exclude)
     result = await session.execute(stmt)
@@ -352,9 +375,11 @@ class ScoutHistoricalAdapter:
         session: AsyncSession,
         *,
         exclude_finding_id: uuid.UUID | None = None,
+        repo_slug: str | None = None,
     ) -> None:
         self._session = session
         self._exclude = exclude_finding_id
+        self._repo_slug = repo_slug.strip().lower() if repo_slug is not None else None
 
     async def search_known_vulnerability(
         self,
@@ -371,12 +396,33 @@ class ScoutHistoricalAdapter:
         cve = _try_normalise_cve(cve_id)
         ghsa = _try_normalise_ghsa(ghsa_id)
         if cve is not None:
-            await _scout_append_cve_matches(self._session, self._exclude, cve, seen_ids, matches)
+            await _scout_append_cve_matches(
+                self._session,
+                self._exclude,
+                cve,
+                seen_ids,
+                matches,
+                repo_slug=self._repo_slug,
+            )
         if ghsa is not None:
-            await _scout_append_ghsa_matches(self._session, self._exclude, ghsa, seen_ids, matches)
+            await _scout_append_ghsa_matches(
+                self._session,
+                self._exclude,
+                ghsa,
+                seen_ids,
+                matches,
+                repo_slug=self._repo_slug,
+            )
         if len(matches) == 0 and cwe_id is not None:
             token = _normalise_cwe_token(cwe_id)
-            await _scout_append_cwe_matches(self._session, self._exclude, token, seen_ids, matches)
+            await _scout_append_cwe_matches(
+                self._session,
+                self._exclude,
+                token,
+                seen_ids,
+                matches,
+                repo_slug=self._repo_slug,
+            )
         return matches
 
 

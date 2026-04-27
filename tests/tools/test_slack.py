@@ -138,6 +138,7 @@ def test_finding_to_report_payload_maps_core_fields() -> None:
     f = Finding(
         id=fid,
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-TEST",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -169,6 +170,7 @@ def test_finding_to_report_payload_omits_evidence_when_not_serializable() -> Non
     f = Finding(
         id=uuid.uuid4(),
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-TEST",
         severity=Severity.high,
         status=FindingStatus.unconfirmed,
@@ -451,6 +453,7 @@ def test_finding_to_report_payload_marks_accepted_risk_when_known_status_is_acce
     f = Finding(
         id=uuid.uuid4(),
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-TEST",
         severity=Severity.high,
         status=FindingStatus.unconfirmed,

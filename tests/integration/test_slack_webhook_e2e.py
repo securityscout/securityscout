@@ -85,6 +85,7 @@ async def e2e_app(tmp_path):
     async with factory() as session:
         finding = Finding(
             workflow=WorkflowKind.advisory,
+            repo_name="acme/app",
             source_ref="acme/app GHSA-E2E-TEST-1234",
             severity=Severity.high,
             ssvc_action=SSVCAction.act,

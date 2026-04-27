@@ -35,6 +35,7 @@ async def test_finding_round_trip(db_session) -> None:
     finding = Finding(
         id=fid,
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="GHSA-xxxx-yyyy-zzzz",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,
@@ -58,6 +59,7 @@ async def test_workflow_run_links_optional_finding(db_session) -> None:
     finding = Finding(
         id=fid,
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="GHSA-abcd",
         severity=Severity.medium,
         title="Linked",

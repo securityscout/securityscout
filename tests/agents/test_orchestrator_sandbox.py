@@ -67,6 +67,7 @@ def _finding_with_poc(
 ) -> Finding:
     f = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-TEST",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,

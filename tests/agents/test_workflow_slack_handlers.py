@@ -48,6 +48,7 @@ def _slack_client_ok() -> httpx.MockTransport:
 async def test_preflight_proceed_enqueues_and_moves_to_building_env(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,
@@ -96,6 +97,7 @@ async def test_preflight_proceed_enqueues_and_moves_to_building_env(db_session) 
 async def test_preflight_cancel_blocks_run(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         title="t",
@@ -136,6 +138,7 @@ async def test_preflight_cancel_blocks_run(db_session) -> None:
 async def test_patch_oracle_request_enqueues_when_eligible(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -174,6 +177,7 @@ async def test_patch_oracle_request_enqueues_when_eligible(db_session) -> None:
 async def test_preflight_proceed_without_ghsa_replies_error(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         title="t",
@@ -213,6 +217,7 @@ async def test_preflight_proceed_without_ghsa_replies_error(db_session) -> None:
 async def test_preflight_when_not_awaiting_replies_only(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         title="t",
@@ -249,6 +254,7 @@ async def test_preflight_when_not_awaiting_replies_only(db_session) -> None:
 async def test_patch_oracle_rejects_non_confirmed_low(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         status=FindingStatus.unconfirmed,
@@ -282,6 +288,7 @@ async def test_patch_oracle_rejects_non_confirmed_low(db_session) -> None:
 async def test_preflight_proceed_without_queue_skips_state_change(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         title="t",
@@ -321,6 +328,7 @@ async def test_preflight_proceed_without_queue_skips_state_change(db_session) ->
 async def test_patch_oracle_without_patch_available(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -355,6 +363,7 @@ async def test_patch_oracle_without_patch_available(db_session) -> None:
 async def test_patch_oracle_without_oracle_metadata(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -389,6 +398,7 @@ async def test_patch_oracle_without_oracle_metadata(db_session) -> None:
 async def test_patch_oracle_without_enqueue(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -423,6 +433,7 @@ async def test_patch_oracle_without_enqueue(db_session) -> None:
 async def test_preflight_unknown_run_returns_silently(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         title="t",
@@ -463,6 +474,7 @@ async def test_preflight_unknown_run_returns_silently(db_session) -> None:
 async def test_preflight_unknown_repo_returns_silently(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         title="t",
@@ -499,6 +511,7 @@ async def test_preflight_unknown_repo_returns_silently(db_session) -> None:
 async def test_preflight_thread_reply_slack_error_is_swallowed(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         title="t",
@@ -540,6 +553,7 @@ async def test_preflight_thread_reply_slack_error_is_swallowed(db_session) -> No
 async def test_preflight_unknown_action_replies_in_thread(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         title="t",
@@ -602,6 +616,7 @@ async def test_patch_oracle_missing_finding_returns_silently(db_session) -> None
 async def test_patch_oracle_unknown_repo_returns_silently(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -636,6 +651,7 @@ async def test_patch_oracle_unknown_repo_returns_silently(db_session) -> None:
 async def test_patch_oracle_whitespace_only_candidates_replies(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
