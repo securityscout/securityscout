@@ -7,7 +7,12 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from agents.orchestrator import AdvisoryWorkflowState, ScheduleRetryParams, run_advisory_workflow
+from agents.orchestrator import (
+    AdvisoryWorkflowParams,
+    AdvisoryWorkflowState,
+    ScheduleRetryParams,
+    run_advisory_workflow,
+)
 from config import GovernanceConfig, GovernanceRule, RepoConfig
 from models import Finding, FindingStatus, Severity, SSVCAction, WorkflowKind, WorkflowRun
 from tools.github import GitHubAPIError, GitHubClient
@@ -55,7 +60,7 @@ async def test_resume_reporting_skips_triage(db_session, mocker) -> None:
         msg = "triage should not run"
         raise AssertionError(msg)
 
-    mocker.patch("agents.orchestrator.run_advisory_triage", side_effect=_triage_must_not_run)
+    mocker.patch("agents.orchestrator.advisory_triage.run_advisory_triage", side_effect=_triage_must_not_run)
 
     repo = _repo()
     f = Finding(
@@ -92,8 +97,7 @@ async def test_resume_reporting_skips_triage(db_session, mocker) -> None:
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            resume_workflow_run_id=run_id,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", resume_workflow_run_id=run_id),
         )
 
     assert out.state == AdvisoryWorkflowState.done.value
@@ -105,7 +109,7 @@ async def test_resume_reporting_skips_triage(db_session, mocker) -> None:
 async def test_resume_triaging_github_transient_no_second_workflow_run(db_session, mocker) -> None:
     repo = _repo()
     mocker.patch(
-        "agents.orchestrator.run_advisory_triage",
+        "agents.orchestrator.advisory_triage.run_advisory_triage",
         side_effect=GitHubAPIError("upstream", is_transient=True, http_status=503),
     )
     schedule = AsyncMock()
@@ -120,8 +124,7 @@ async def test_resume_triaging_github_transient_no_second_workflow_run(db_sessio
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            schedule_retry=schedule,
+            AdvisoryWorkflowParams(ghsa_id="GHSA-TEST-ABCD-EFGH", schedule_retry=schedule),
         )
 
     assert out.state == AdvisoryWorkflowState.triaging.value
@@ -129,7 +132,7 @@ async def test_resume_triaging_github_transient_no_second_workflow_run(db_sessio
     assert len((await db_session.execute(select(WorkflowRun))).scalars().all()) == 1
 
     mocker.patch(
-        "agents.orchestrator.run_advisory_triage",
+        "agents.orchestrator.advisory_triage.run_advisory_triage",
         side_effect=GitHubAPIError("upstream", is_transient=True, http_status=503),
     )
     schedule2 = AsyncMock()
@@ -144,9 +147,9 @@ async def test_resume_triaging_github_transient_no_second_workflow_run(db_sessio
             scm,
             http,
             slack,
-            ghsa_id="GHSA-TEST-ABCD-EFGH",
-            resume_workflow_run_id=out.id,
-            schedule_retry=schedule2,
+            AdvisoryWorkflowParams(
+                ghsa_id="GHSA-TEST-ABCD-EFGH", resume_workflow_run_id=out.id, schedule_retry=schedule2
+            ),
         )
 
     assert out2.retry_count == 2
