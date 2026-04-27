@@ -34,6 +34,7 @@ async def test_run_patch_oracle_upgrades_when_differential_holds(db_session, moc
 
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-1111-2222-3333",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,
@@ -115,6 +116,7 @@ async def test_run_patch_oracle_upgrades_when_differential_holds(db_session, moc
 async def test_run_patch_oracle_rejects_wrong_status(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-X",
         severity=Severity.high,
         status=FindingStatus.unconfirmed,
@@ -145,6 +147,7 @@ async def test_run_patch_oracle_rejects_wrong_status(db_session) -> None:
 async def test_run_patch_oracle_requires_patched_candidates(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -174,6 +177,7 @@ async def test_run_patch_oracle_requires_patched_candidates(db_session) -> None:
 async def test_run_patch_oracle_rejects_run_finding_mismatch(db_session) -> None:
     f1 = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="r1",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -184,6 +188,7 @@ async def test_run_patch_oracle_rejects_run_finding_mismatch(db_session) -> None
     )
     f2 = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="r2",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -229,6 +234,7 @@ async def test_run_patch_oracle_finding_not_found(db_session) -> None:
 async def test_run_patch_oracle_run_not_found(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="r",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -255,6 +261,7 @@ async def test_run_patch_oracle_run_not_found(db_session) -> None:
 async def test_run_patch_oracle_requires_patch_available_flag(db_session) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="r",
         severity=Severity.high,
         status=FindingStatus.confirmed_low,
@@ -290,6 +297,7 @@ async def test_run_patch_oracle_defaults_vulnerable_ref_to_default_git_ref(
 ) -> None:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="ref",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,
@@ -361,6 +369,7 @@ async def test_run_patch_oracle_tries_next_patched_candidate_when_clone_fails(
 
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-1111-2222-3333",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,
@@ -452,6 +461,7 @@ async def test_run_patch_oracle_tries_next_patched_candidate_when_image_build_fa
 
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-1111-2222-3333",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,

@@ -390,7 +390,12 @@ def _build_issue_tracker_adapters(
                 )
                 continue
             adapters.append(LinearIssuesAdapter(http, entry, credentials))
-    adapters.append(ScoutHistoricalAdapter(session))
+    adapters.append(
+        ScoutHistoricalAdapter(
+            session,
+            repo_slug=f"{repo.github_org}/{repo.github_repo}".lower(),
+        ),
+    )
     return adapters
 
 
@@ -451,7 +456,7 @@ async def run_advisory_triage(
 ) -> Finding:
     log = _LOG.bind(agent="triage", run_id=str(run_id) if run_id else None)
     ghsa = normalise_ghsa_id(ghsa_id)
-    repo_slug = f"{repo.github_org}/{repo.github_repo}"
+    repo_slug = f"{repo.github_org}/{repo.github_repo}".lower()
     advisory = await scm.fetch_advisory(
         ghsa,
         repo=repo_slug if advisory_source == "repository" else None,
@@ -555,6 +560,7 @@ async def run_advisory_triage(
 
     row = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name=repo_slug,
         source_ref=source_ref,
         severity=severity,
         ssvc_action=ssvc,

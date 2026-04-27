@@ -51,6 +51,7 @@ def _finding(
         id=id,
         title=title,
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref=source_ref,
         severity=severity,
         ssvc_action=ssvc_action,

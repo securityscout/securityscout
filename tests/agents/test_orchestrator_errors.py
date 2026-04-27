@@ -55,6 +55,7 @@ def _slack_transport_ok() -> httpx.MockTransport:
 async def _make_finding(session: object) -> Finding:
     f = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-TEST",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,

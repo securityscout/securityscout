@@ -63,6 +63,7 @@ class Finding(Base):
         Enum(WorkflowKind, native_enum=False, length=32),
         nullable=False,
     )
+    repo_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     source_ref: Mapped[str] = mapped_column(String(2048), nullable=False)
     severity: Mapped[Severity] = mapped_column(Enum(Severity, native_enum=False, length=32), nullable=False)
     ssvc_action: Mapped[SSVCAction | None] = mapped_column(
@@ -112,6 +113,7 @@ class WorkflowRun(Base):
         Enum(WorkflowKind, native_enum=False, length=32),
         nullable=False,
     )
+    repo_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     state: Mapped[str] = mapped_column(String(128), nullable=False)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

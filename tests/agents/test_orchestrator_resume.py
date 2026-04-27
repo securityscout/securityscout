@@ -60,6 +60,7 @@ async def test_resume_reporting_skips_triage(db_session, mocker) -> None:
     repo = _repo()
     f = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/advisories/GHSA-TEST",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,

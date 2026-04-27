@@ -63,6 +63,7 @@ async def test_workflow_happy_path_completes(db_session, mocker) -> None:
     async def fake_triage(session, *args: object, **kwargs: object) -> Finding:
         f = Finding(
             workflow=WorkflowKind.advisory,
+            repo_name="acme/app",
             source_ref="https://github.com/advisories/GHSA-TEST",
             severity=Severity.high,
             ssvc_action=SSVCAction.act,
@@ -203,6 +204,7 @@ async def test_slack_transient_schedules_retry(db_session, mocker) -> None:
     async def fake_triage(session, *args: object, **kwargs: object) -> Finding:
         f = Finding(
             workflow=WorkflowKind.advisory,
+            repo_name="acme/app",
             source_ref="https://github.com/advisories/GHSA-TEST",
             severity=Severity.high,
             title="T",
@@ -254,6 +256,7 @@ async def test_advisory_to_slack_seconds_metric_emitted(db_session, mocker) -> N
     async def fake_triage(session, *args: object, **kwargs: object) -> Finding:
         f = Finding(
             workflow=WorkflowKind.advisory,
+            repo_name="acme/app",
             source_ref="https://github.com/advisories/GHSA-TEST",
             severity=Severity.high,
             ssvc_action=SSVCAction.act,
@@ -306,6 +309,7 @@ async def test_auto_resolve_tier_skips_slack_and_finishes(db_session, mocker) ->
     async def fake_triage(session, *_a: object, **_k: object) -> Finding:
         f = Finding(
             workflow=WorkflowKind.advisory,
+            repo_name="acme/app",
             source_ref="https://github.com/advisories/GHSA-DUP",
             severity=Severity.low,
             ssvc_action=SSVCAction.track,
@@ -360,6 +364,7 @@ async def test_notify_tier_posts_slack_and_finishes(db_session, mocker) -> None:
     async def fake_triage(session, *_a: object, **_k: object) -> Finding:
         f = Finding(
             workflow=WorkflowKind.advisory,
+            repo_name="acme/app",
             source_ref="https://github.com/advisories/GHSA-NOTIFY",
             severity=Severity.medium,
             ssvc_action=SSVCAction.attend,
@@ -409,6 +414,7 @@ async def test_approve_tier_parks_in_awaiting_approval(db_session, mocker) -> No
     async def fake_triage(session, *_a: object, **_k: object) -> Finding:
         f = Finding(
             workflow=WorkflowKind.advisory,
+            repo_name="acme/app",
             source_ref="https://github.com/advisories/GHSA-CRIT",
             severity=Severity.critical,
             ssvc_action=SSVCAction.immediate,
@@ -458,6 +464,7 @@ async def test_default_governance_parks_high_severity_in_awaiting_approval(db_se
     async def fake_triage(session, *_a: object, **_k: object) -> Finding:
         f = Finding(
             workflow=WorkflowKind.advisory,
+            repo_name="acme/app",
             source_ref="https://github.com/advisories/GHSA-DEFAULT",
             severity=Severity.high,
             ssvc_action=SSVCAction.act,

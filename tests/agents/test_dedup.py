@@ -42,6 +42,7 @@ async def _seed_finding_and_run(
 ) -> tuple[Finding, WorkflowRun]:
     finding = Finding(
         workflow=WorkflowKind.advisory,
+        repo_name="acme/app",
         source_ref="https://github.com/acme/app/security/advisories/GHSA-TEST",
         severity=Severity.high,
         ssvc_action=SSVCAction.act,
