@@ -500,11 +500,11 @@ async def _sync_one_poll_state(
                 listed=listed,
             )
 
-        if hit_rl or hit_enq_cap:
+        if hit_rl:
             new_w = old_w
         elif enqueued_ua:
             new_w = min(enqueued_ua)
-        elif not enqueued_ua and seen_ua and not hit_enq_cap and not hit_rl and (natural_stop or exhausted_pages):
+        elif not enqueued_ua and seen_ua and not hit_enq_cap and (natural_stop or exhausted_pages):
             new_w = min(seen_ua)
         else:
             new_w = old_w

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -154,7 +154,11 @@ async def test_run_sync_errors_when_no_redis() -> None:
         mlog.error.assert_called()
 
 
-def _app_with_triage_poll(*, seed_without_enqueue: bool = False) -> AppConfig:
+def _app_with_triage_poll(
+    *,
+    seed_without_enqueue: bool = False,
+    settings: Settings | None = None,
+) -> AppConfig:
     r = RepoConfig(
         name="r",
         github_org="Acme",
@@ -167,7 +171,7 @@ def _app_with_triage_poll(*, seed_without_enqueue: bool = False) -> AppConfig:
         advisory_poll_seed_without_enqueue=seed_without_enqueue,
     )
     return AppConfig(
-        settings=Settings(),
+        settings=settings or Settings(),
         repos=ReposManifest(repos=[r]),
         repos_yaml_sha256="0" * 64,
         repos_yaml_path=Path("/dev/null"),
@@ -329,6 +333,61 @@ async def test_sync_enqueues_and_sets_watermark() -> None:
             assert isinstance(kwargs.get("seconds"), int | float)
             duration_logged = True
     assert duration_logged
+
+
+@pytest.mark.asyncio
+async def test_sync_watermark_advances_to_min_enqueued_when_global_cap_hit() -> None:
+    r = FakeAsyncRedis()
+    rate_limiter = SlidingWindowRateLimiter(r)
+    base = datetime(2024, 8, 1, 12, 0, 0, tzinfo=UTC)
+    page = tuple(
+        AdvisoryData(
+            ghsa_id=f"GHSA-{i:04X}-BCDE-FG00",
+            source="repository",
+            summary="s",
+            description="d",
+            updated_at=base + timedelta(hours=100 - i),
+        )
+        for i in range(100)
+    )
+    s = Settings()
+    s.advisory_poll_max_enqueues_per_tick_global = 25
+    app = _app_with_triage_poll(settings=s)
+    with (
+        patch("tools.advisory_polling.GitHubSCMProvider", return_value=_FakeScm([page])),
+        patch("tools.advisory_polling.try_enqueue_advisory", new_callable=AsyncMock) as tq,
+    ):
+        tq.return_value = "job"
+        await run_repository_advisories_sync(
+            settings=app.settings,
+            app_config=app,
+            redis=r,
+            rate_limiter=rate_limiter,
+        )
+    assert tq.await_count == 25
+    expect_min = base + timedelta(hours=76)
+    wm_raw = await r.get("poll:advisory:wm:acme/rr:triage")
+    assert wm_raw is not None
+    assert _parse_watermark_value(wm_raw) == expect_min
+
+
+@pytest.mark.asyncio
+async def test_sync_seed_without_enqueue_empty_first_page_leaves_watermark_absent() -> None:
+    r = FakeAsyncRedis()
+    rate_limiter = SlidingWindowRateLimiter(r)
+    app = _app_with_triage_poll(seed_without_enqueue=True)
+    with (
+        patch("tools.advisory_polling.GitHubSCMProvider", return_value=_FakeScm([()])),
+        patch("tools.advisory_polling.try_enqueue_advisory", new_callable=AsyncMock) as tq,
+    ):
+        await run_repository_advisories_sync(
+            settings=app.settings,
+            app_config=app,
+            redis=r,
+            rate_limiter=rate_limiter,
+        )
+    tq.assert_not_awaited()
+    assert await r.get("poll:advisory:wm:acme/rr:triage") is None
 
 
 @pytest.mark.asyncio
