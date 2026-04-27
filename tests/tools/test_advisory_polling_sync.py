@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from arq.connections import ArqRedis as _ArqRedis
 from fakeredis import FakeAsyncRedis
@@ -14,6 +15,7 @@ from fakeredis import FakeAsyncRedis
 from config import AdvisoryPollInterval, AppConfig, RepoConfig, ReposManifest, Settings
 from exceptions import SecurityScoutError
 from tools.advisory_polling import (
+    _github_ratelimit_remaining_value,
     _GlobalEnqueueBudget,
     _parse_watermark_value,
     _watermark_iso_utc,
@@ -41,6 +43,12 @@ def test_advisory_list_watermark_key() -> None:
 
 def test_advisory_list_etag_key() -> None:
     assert advisory_list_etag_key(repo_slug="acme/p", state="Triage") == "etag:advisory:acme/p:triage"
+
+
+def test_github_ratelimit_remaining_value_from_response_headers() -> None:
+    r = httpx.Response(200, headers={"x-ratelimit-remaining": "4000"})
+    assert _github_ratelimit_remaining_value(r) == 4000
+    assert _github_ratelimit_remaining_value(httpx.Response(200, headers={})) is None
 
 
 def test_watermark_round_trip() -> None:
@@ -295,6 +303,7 @@ async def test_sync_enqueues_and_sets_watermark() -> None:
     with (
         patch("tools.advisory_polling.GitHubSCMProvider", return_value=_FakeScm(pages=[(adv,)])),
         patch("tools.advisory_polling.try_enqueue_advisory", new_callable=AsyncMock) as tq,
+        patch("tools.advisory_polling._LOG") as mlog,
     ):
         tq.return_value = "job-1"
         await run_repository_advisories_sync(
@@ -307,6 +316,19 @@ async def test_sync_enqueues_and_sets_watermark() -> None:
     wm = await r.get("poll:advisory:wm:acme/rr:triage")
     assert wm is not None
     assert len(wm) > 0
+    mlog.info.assert_any_call(
+        "advisory_poll_tick",
+        metric_name="advisory_poll_tick_total",
+        result="ok",
+    )
+    duration_logged = False
+    for c in mlog.info.call_args_list:
+        args, kwargs = c
+        if args and args[0] == "advisory_poll_tick_duration":
+            assert kwargs.get("metric_name") == "advisory_poll_tick_duration_seconds"
+            assert isinstance(kwargs.get("seconds"), int | float)
+            duration_logged = True
+    assert duration_logged
 
 
 @pytest.mark.asyncio

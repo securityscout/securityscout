@@ -99,6 +99,7 @@ def test_scm_provider_protocol_accepts_full_custom_implementation() -> None:
             _poll_first_page_if_none_match: str | None = None,
             _poll_on_first_page_not_modified: object = None,
             _poll_on_first_page_etag: object = None,
+            _poll_on_list_page_response: object = None,
         ) -> AsyncIterator[tuple[AdvisoryData, ...]]:
             if False:  # pragma: no cover
                 yield ()  # type: ignore[unreachable]

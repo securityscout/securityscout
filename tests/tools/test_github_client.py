@@ -603,6 +603,60 @@ async def test_iter_repository_security_advisories_invokes_etag_callback_on_200(
 
 
 @pytest.mark.asyncio
+async def test_iter_repository_security_advisories_invokes_on_list_page_response() -> None:
+    seen: list[int] = []
+
+    async def on_list(resp: httpx.Response) -> None:
+        seen.append(resp.status_code)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[{"ghsa_id": "GHSA-0001-AAAA-BBBB", "summary": "a", "description": ""}],
+            headers={"etag": '"abc"', "x-ratelimit-remaining": "4999"},
+        )
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        async for _page in gh.iter_repository_security_advisories(
+            "acme",
+            "app",
+            on_first_page_etag=AsyncMock(),
+            on_list_page_response=on_list,
+        ):
+            pass
+    assert seen == [200]
+
+
+@pytest.mark.asyncio
+async def test_iter_repository_security_advisories_on_list_page_response_304() -> None:
+    seen: list[int] = []
+
+    async def on_list(resp: httpx.Response) -> None:
+        seen.append(resp.status_code)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(304, headers={"x-ratelimit-remaining": "4998"})
+
+    on_nm = AsyncMock()
+
+    async with _transport(httpx.MockTransport(handler)) as client:
+        gh = GitHubClient("token", client=client)
+        async for _page in gh.iter_repository_security_advisories(
+            "acme",
+            "app",
+            per_page=10,
+            max_pages=5,
+            first_page_if_none_match='"old"',
+            on_first_page_not_modified=on_nm,
+            on_list_page_response=on_list,
+        ):
+            pass
+    assert seen == [304]
+    on_nm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_iter_repository_security_advisories_304_without_if_none_match_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(304)

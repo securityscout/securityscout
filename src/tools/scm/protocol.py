@@ -65,6 +65,7 @@ class SCMProvider(Protocol):
         poll_first_page_if_none_match: str | None = None,
         poll_on_first_page_not_modified: Callable[[], Awaitable[None]] | None = None,
         poll_on_first_page_etag: Callable[[str], Awaitable[None]] | None = None,
+        poll_on_list_page_response: Callable[[object], Awaitable[None]] | None = None,
     ) -> AsyncIterator[tuple[AdvisoryData, ...]]:
         """Stream repository security advisories page by page (async generator; use ``async for``)."""
         ...

@@ -509,6 +509,7 @@ class GitHubClient:
         first_page_if_none_match: str | None = None,
         on_first_page_not_modified: Callable[[], Awaitable[None]] | None = None,
         on_first_page_etag: Callable[[str], Awaitable[None]] | None = None,
+        on_list_page_response: Callable[[httpx.Response], Awaitable[None]] | None = None,
     ) -> AsyncIterator[tuple[AdvisoryData, ...]]:
         """Yield one page of repository security advisories (cursor-paginated)."""
         o = validate_github_repo_owner(owner)
@@ -541,6 +542,8 @@ class GitHubClient:
                 workflow_run_id=workflow_run_id,
                 etag=inm,
             )
+            if on_list_page_response is not None:
+                await on_list_page_response(response)
             if response.status_code == 304:
                 if on_first_page_not_modified is not None:
                     await on_first_page_not_modified()

@@ -5,8 +5,9 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import delete
@@ -22,12 +23,15 @@ from models import (
     WorkflowRun,
 )
 from tools.advisory_polling import (
+    _log_advisory_poll_api_error,
+    _log_advisory_poll_ratelimit_gauge,
     default_advisory_dedup_lock_ttl_seconds,
     has_active_workflow_run,
     has_existing_advisory_finding,
     try_acquire_advisory_dedup_lock,
     try_enqueue_advisory,
 )
+from tools.github import GitHubAPIError, GitHubMalformedResponseError
 
 _GH = "GHSA-ABCD-ABCD-ABCD"
 
@@ -278,3 +282,30 @@ async def test_has_active_workflow_run_postgres_outerjoin() -> None:
             await session.commit()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_log_advisory_poll_ratelimit_gauge_emits_structlog_metric() -> None:
+    r = httpx.Response(200, headers={"x-ratelimit-remaining": "10"})
+    with patch("tools.advisory_polling._LOG") as mlog:
+        await _log_advisory_poll_ratelimit_gauge(repo="reponame", response=r)
+    mlog.info.assert_called_once()
+    assert mlog.info.call_args[0][0] == "advisory_poll_ratelimit_remaining"
+    assert mlog.info.call_args[1]["metric_name"] == "advisory_poll_ratelimit_remaining"
+    assert mlog.info.call_args[1]["repo"] == "reponame"
+    assert mlog.info.call_args[1]["remaining"] == 10
+
+
+def test_log_advisory_poll_api_error_status_mapping() -> None:
+    with patch("tools.advisory_polling._LOG") as m:
+        _log_advisory_poll_api_error(repo="r1", exc=GitHubAPIError("x", is_transient=True, http_status=502))
+        assert m.warning.call_args[1]["status"] == "502"
+    with patch("tools.advisory_polling._LOG") as m:
+        _log_advisory_poll_api_error(repo="r1", exc=GitHubMalformedResponseError("x"))
+        assert m.warning.call_args[1]["status"] == "parse_error"
+    with patch("tools.advisory_polling._LOG") as m:
+        _log_advisory_poll_api_error(repo="r1", exc=httpx.ReadTimeout("t"))
+        assert m.warning.call_args[1]["status"] == "request_error"
+    with patch("tools.advisory_polling._LOG") as m:
+        _log_advisory_poll_api_error(repo="r1", exc=RuntimeError("n"))
+        assert m.warning.call_args[1]["status"] == "RuntimeError"
