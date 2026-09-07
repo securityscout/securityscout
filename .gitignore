@@ -1,42 +1,50 @@
-# Python
+# --- secrets / local state ----------------------------------------------------
+.env
+.env.local
+*.pem
+*.key
+credentials*.json
+service-account*.json
+data/csv/
+data/ingest-rejects/
+
+# --- internal architecture / spec docs (also globally ignored) ----------------
+documentation/
+
+# --- python -------------------------------------------------------------------
 __pycache__/
 *.py[cod]
-*.pyo
+*$py.class
 *.egg-info/
-dist/
-build/
-
-# Virtual environments
+.eggs/
 .venv/
 venv/
-
-# Environment & production secrets
-.env
-secrets/
-
-# Type checking / linting / testing caches
-.mypy_cache/
 .pytest_cache/
+.mypy_cache/
 .ruff_cache/
-
-# Coverage
 .coverage
-.coverage.*
 htmlcov/
-coverage.xml
+build/
+dist/
 
-# SQLite
+# --- runtime state — populated at run time, not committed ---------------------
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+repos/
+.cache/
+verdicts/
+poc/
+findings/
+parse_errors.csv
 
-# IDE
-.idea/
-*.swp
-*.swo
-*~
+# --- javascript ---------------------------------------------------------------
+node_modules/
+web/dist/
 
-# OS
+# --- macOS / IDE --------------------------------------------------------------
 .DS_Store
-Thumbs.db
-
-# Logs
-*.log
+.idea/
+.vscode/
+*.swp

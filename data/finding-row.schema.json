@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://securityscout/schemas/finding-row.json",
+  "title": "Ingested SAST finding row",
+  "description": "Per-row contract enforced by triage/ingest.py before SQLite insert. Fields are the normalized output of the CSV → row pipeline; leftover source columns are preserved as scanner_meta_json.",
+  "type": "object",
+  "required": [
+    "id",
+    "scanner_finding_id",
+    "repo_url",
+    "sha",
+    "rule_id",
+    "file",
+    "line",
+    "severity"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "sha256(repo_url|sha|file|line|rule_id) — content-addressed primary key.",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scanner_finding_id": {
+      "type": "string",
+      "description": "The scanner's own finding id. Not unique across scanners.",
+      "minLength": 1
+    },
+    "scanner_name": {
+      "type": ["string", "null"],
+      "description": "Which SAST produced the row (codeql, bandit, custom, …)."
+    },
+    "repo_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Full clone URL — any GitLab, GitHub, or Bitbucket origin."
+    },
+    "repository_name": {
+      "type": ["string", "null"],
+      "description": "Namespace/path form (e.g. `group/repo` or `org/team/repo`)."
+    },
+    "branch": {
+      "type": ["string", "null"],
+      "description": "Refspec the finding was reported against, e.g. `refs/heads/master`."
+    },
+    "sha": {
+      "type": "string",
+      "description": "Commit SHA the finding was reported at. The orchestrator anchors at this SHA — never HEAD.",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "rule_id": {
+      "type": "string",
+      "description": "Scanner rule identifier.",
+      "minLength": 1
+    },
+    "file": {
+      "type": "string",
+      "description": "Repo-relative path to the flagged file.",
+      "minLength": 1
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "1-based line number. 0 means the source did not expose a line."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["Critical", "High", "Medium", "Low", "Info", "Unknown"]
+    },
+    "scanner_confidence": {
+      "type": ["string", "null"],
+      "enum": ["High", "Medium", "Low", null]
+    },
+    "category": {
+      "type": ["string", "null"],
+      "description": "Free-form category (`security`, `best-practice`, `other`, …)."
+    },
+    "description": {
+      "type": ["string", "null"],
+      "description": "Rule description / message — seeds the agent's first read."
+    },
+    "scanner_url": {
+      "type": ["string", "null"],
+      "format": "uri",
+      "description": "Dashboard or ticket URL for this finding, if the scanner has one."
+    },
+    "line_of_code_url": {
+      "type": ["string", "null"],
+      "format": "uri",
+      "description": "GitLab/GitHub/Bitbucket source URL with blob sha, path, and line fragment."
+    }
+  }
+}

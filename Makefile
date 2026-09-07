@@ -1,88 +1,224 @@
-.PHONY: help install format lint typecheck test testcov testslow testintegration check all clean \
-	services services-down run worker migrate db-upgrade
+# securityscout — Makefile.
+#
+# Bootstrap targets:
+#   bootstrap   — install toolchain + Python deps + skill (idempotent)
+#   schema      — create / migrate SQLite schema at $(TRIAGE_DB_PATH)
+#   verify      — bootstrap acceptance gate; exit 0 = ready to ingest
+#
+# Pipeline targets that are not yet implemented exit non-zero with a clear
+# message.
 
-.DEFAULT_GOAL := help
+SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
 
-# Resolve imports for the src/ layout (matches pytest pythonpath in pyproject.toml).
-export PYTHONPATH := src
+# Project-local venv at .venv/ to dodge PEP 668 on Homebrew Python. Every
+# triage.* invocation runs through VENV_PY; rules that need it bail with a
+# clear error when it's missing instead of silently using system python.
+SYSTEM_PYTHON ?= python3
+VENV_DIR    ?= .venv
+VENV_PY     := $(VENV_DIR)/bin/python
+VENV_PIP    := $(VENV_DIR)/bin/pip
 
-UVICORN_HOST ?= 127.0.0.1
-UVICORN_PORT ?= 8000
+TRIAGE_DB   ?= triage.db
+SKILL_HOME  ?= $(HOME)/.cursor/skills/sast-triage
+SKILL_FILE  := $(SKILL_HOME)/SKILL.md
+# Vendored, polyglot-expanded skill source — checked in so this tool isn't
+# coupled to any upstream copy.
+VENDORED_SKILL ?= $(CURDIR)/data/sast-triage.SKILL.md
 
-POSTGRES_TEST_URL ?= postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/postgres
-export POSTGRES_TEST_URL
+# Only `gh` is needed on the laptop today (org inventory / clone).
+# Sandbox scanners (trivy, osv-scanner) and jbang land with later
+# workstreams, not in this bootstrap.
 
+.PHONY: help
 help:
-	@echo "Security Scout — common targets"
-	@echo ""
-	@echo "  make install          Sync deps (uv) and install pre-commit hooks"
-	@echo "  make services         Start Redis + Postgres (docker compose up -d)"
-	@echo "  make services-down    Stop compose services"
-	@echo "  make run              FastAPI CLI (dev + reload) via src/main.py ($(UVICORN_HOST):$(UVICORN_PORT))"
-	@echo "  make worker           ARQ worker (process_advisory_workflow_job)"
-	@echo "  make migrate          Alembic: upgrade database to head (set DATABASE_URL)"
-	@echo "  make check            lint + typecheck + coverage (SQLite + Postgres suites)"
-	@echo "  make test             pytest -m \"not postgres\" (fast; default for local loop)"
-	@echo "  make testpostgres     pytest -m postgres (needs POSTGRES_TEST_URL / compose postgres)"
-	@echo "  make testslow         pytest -m slow (may include @postgres tests later — need DB if so)"
-	@echo "  make testintegration  pytest -m integration (same note if markers combine with postgres)"
-	@echo ""
-	@echo "Typical local run (two terminals):"
-	@echo "  1. make services && make run"
-	@echo "  2. make worker"
+	@echo "Available targets:"
+	@echo "  bootstrap            — install toolchain (brew + pipx fallbacks + pip + skill)"
+	@echo "  bootstrap-venv       — create .venv (Python 3.10+)"
+	@echo "  bootstrap-brew       — brew install the toolchain (non-fatal if brew unreachable)"
+	@echo "  bootstrap-fallbacks  — report missing brew tools"
+	@echo "  bootstrap-pip        — install Python deps into .venv"
+	@echo "  schema               — create SQLite schema at $(TRIAGE_DB)"
+	@echo "  verify               — bootstrap acceptance gate; exit 0 = ready to ingest"
+	@echo "  test                 — run pytest + web tests + web production build"
+	@echo "  test-py              — run pytest suite"
+	@echo "  test-web             — run web Vitest + typecheck + Vite build"
+	@echo "  build                — web production build (typecheck + Vite)"
+	@echo "  skill                — (re)install ~/.cursor/skills/sast-triage/SKILL.md"
+	@echo "  clean-db             — delete $(TRIAGE_DB) (DESTRUCTIVE)"
+	@echo "  ingest CSV=path [DRY=1] [EXCLUDE=glob,…] — SAST CSV ingest"
+	@echo "  classify-access [COMMIT=1] [HOSTS=h1,h2] [PROBE=per_repo|membership] — flip rows between queued↔no_access via live API"
+	@echo "  recon|triage|verify-verdicts|report|calibrate — not yet implemented"
 
-install:
-	uv sync --dev
-	uv run pre-commit install
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
 
-format:
-	uv run ruff format src/ tests/
-	uv run ruff check --fix src/ tests/
+.PHONY: bootstrap
+bootstrap: bootstrap-venv bootstrap-brew bootstrap-fallbacks bootstrap-pip skill
+	@echo
+	@echo "==> bootstrap complete. Run 'make verify' next."
 
-lint:
-	uv run ruff check src/ tests/
-	uv run ruff format --check src/ tests/
+.PHONY: bootstrap-venv
+bootstrap-venv:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "==> creating venv at $(VENV_DIR) using $(SYSTEM_PYTHON)"; \
+	  $(SYSTEM_PYTHON) -m venv "$(VENV_DIR)"; \
+	  "$(VENV_PIP)" install --upgrade pip >/dev/null; \
+	else \
+	  echo "✓ venv already present at $(VENV_DIR)"; \
+	fi
 
-typecheck:
-	uv run mypy src/
+.PHONY: bootstrap-brew
+bootstrap-brew:
+	@if command -v gh >/dev/null 2>&1; then \
+	  echo "✓ gh already installed at $$(command -v gh)"; \
+	  exit 0; \
+	fi
+	@if ! command -v brew >/dev/null 2>&1; then \
+	  echo "!! gh not on PATH and brew missing — install GitHub CLI manually."; \
+	  exit 0; \
+	fi
+	@echo "==> brew install gh"
+	@brew install gh || echo "!! brew install gh failed — install GitHub CLI manually."
 
-test:
-	uv run pytest -x -n auto --dist loadgroup -m "not postgres"
+.PHONY: bootstrap-fallbacks
+bootstrap-fallbacks:
+	@if command -v gh >/dev/null 2>&1; then \
+	  echo "✓ gh already installed at $$(command -v gh)"; \
+	else \
+	  echo "!! gh MISSING — brew install gh"; \
+	fi
 
-testcov:
-	uv run pytest -x -n auto --dist loadgroup -m "not postgres" --cov=src --cov-report=term-missing
-	uv run pytest -x -n auto --dist loadgroup -m postgres --cov=src --cov-append --cov-report=term-missing
+.PHONY: bootstrap-pip
+bootstrap-pip: bootstrap-venv
+	@echo "==> Installing Python dependencies into $(VENV_DIR)"
+	@"$(VENV_PIP)" install --upgrade \
+	  "jsonschema>=4.20" \
+	  "python-dotenv>=1.0" \
+	  "pytest>=8.0"
 
-testpostgres:
-	uv run pytest -x -n auto --dist loadgroup -m postgres
+.PHONY: skill
+skill:
+	@mkdir -p "$(SKILL_HOME)"
+	@if [ -f "$(VENDORED_SKILL)" ]; then \
+	  cp -f "$(VENDORED_SKILL)" "$(SKILL_FILE)"; \
+	  echo "✓ installed $(SKILL_FILE) from $(VENDORED_SKILL)"; \
+	else \
+	  echo "ERROR: vendored skill not found at $(VENDORED_SKILL)"; \
+	  echo "       restore data/sast-triage.SKILL.md from git or set VENDORED_SKILL."; \
+	  exit 1; \
+	fi
 
-testslow:
-	uv run pytest -m slow
+.PHONY: schema
+schema:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@"$(VENV_PY)" -m triage.db init --path "$(TRIAGE_DB)"
 
-testintegration:
-	uv run pytest -m integration
+.PHONY: clean-db
+clean-db:
+	@rm -f "$(TRIAGE_DB)" "$(TRIAGE_DB)-journal" "$(TRIAGE_DB)-wal" "$(TRIAGE_DB)-shm"
+	@echo "✓ removed $(TRIAGE_DB) and journals"
 
-check: lint typecheck testcov
+.PHONY: verify
+verify:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@"$(VENV_PY)" -m triage.verify
 
-all: format check
+.PHONY: test test-py test-web build
+test: test-py test-web
 
-clean:
-	rm -rf .mypy_cache .pytest_cache .ruff_cache htmlcov .coverage coverage.xml dist/
-	find . -type d -name __pycache__ -exec rm -rf {} +
+test-py:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@"$(VENV_PY)" -m pytest tests/ -v
 
-services:
-	docker compose up -d redis postgres
+test-web:
+	@if [ ! -x web/node_modules/.bin/vitest ]; then \
+	  echo "ERROR: web deps missing. Run: npm --prefix web install"; exit 1; \
+	fi
+	@npm --prefix web test
+	@npm --prefix web run build
 
-services-down:
-	docker compose down
+build:
+	@if [ ! -x web/node_modules/.bin/vite ]; then \
+	  echo "ERROR: web deps missing. Run: npm --prefix web install"; exit 1; \
+	fi
+	@npm --prefix web run build
 
-run:
-	uv run fastapi dev src/main.py --host $(UVICORN_HOST) --port $(UVICORN_PORT)
+# ---------------------------------------------------------------------------
+# Ingest
+#
+# Usage:
+#   make ingest CSV=data/csv/<file>.csv          # writes to triage.db
+#   make ingest CSV=... DRY=1                    # dry-run, no DB writes
+#   make ingest CSV=... EXCLUDE='*foo*,*bar*'    # extra exclude globs
+#   make ingest CSV=... NO_DEFAULT_EXCLUDES=1    # opt out of test-fixture filter
+# ---------------------------------------------------------------------------
 
-worker:
-	uv run python src/run_worker.py
+DRY ?=
+EXCLUDE ?=
+NO_DEFAULT_EXCLUDES ?=
 
-migrate: db-upgrade
+.PHONY: ingest
+ingest:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@if [ -z "$(CSV)" ]; then \
+	  echo "ERROR: pass CSV=path/to/findings.csv"; exit 1; \
+	fi
+	@flags=""; \
+	if [ -n "$(DRY)" ]; then flags="$$flags --dry-run"; fi; \
+	if [ -n "$(EXCLUDE)" ]; then flags="$$flags --exclude-repos '$(EXCLUDE)'"; fi; \
+	if [ -n "$(NO_DEFAULT_EXCLUDES)" ]; then flags="$$flags --no-default-excludes"; fi; \
+	"$(VENV_PY)" -m triage.ingest --csv "$(CSV)" --db "$(TRIAGE_DB)" $$flags
 
-db-upgrade:
-	uv run alembic upgrade head
+# ---------------------------------------------------------------------------
+# Access classification
+#
+# Cross-references each reclassifiable finding's repo_url against a live
+# access predicate and flips rows between `queued` and `no_access`. Only
+# `queued` and `no_access` rows are eligible — every other status is sticky.
+#
+# Dry-run is the default; pass COMMIT=1 to actually write. HOSTS overrides
+# TRIAGE_ACCESS_HOSTS for a one-off run (hosts not in the list default to
+# `no_access` — add them once an auth strategy is wired up). PROBE overrides
+# TRIAGE_ACCESS_PROBE — `per_repo` (default) or `membership`.
+#
+# Usage:
+#   make classify-access                                # dry-run, default probe
+#   make classify-access COMMIT=1                       # apply
+#   make classify-access HOSTS=github.com,gitlab.com COMMIT=1
+#   make classify-access PROBE=membership               # cheap, misses inheritance
+# ---------------------------------------------------------------------------
+
+COMMIT ?=
+HOSTS ?=
+PROBE ?=
+
+.PHONY: classify-access
+classify-access:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@flags=""; \
+	if [ -n "$(COMMIT)" ]; then flags="$$flags --apply"; fi; \
+	if [ -n "$(HOSTS)" ]; then flags="$$flags --hosts '$(HOSTS)'"; fi; \
+	if [ -n "$(PROBE)" ]; then flags="$$flags --probe '$(PROBE)'"; fi; \
+	"$(VENV_PY)" -m triage.classify_access --db "$(TRIAGE_DB)" $$flags
+
+# ---------------------------------------------------------------------------
+# Stubs — fail loudly until implemented.
+# ---------------------------------------------------------------------------
+
+.PHONY: recon triage verify-verdicts report calibrate
+
+recon triage verify-verdicts report calibrate:
+	@echo "ERROR: '$@' is not yet implemented."
+	@exit 2

@@ -1,0 +1,337 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://triage-pipeline.local/schemas/verdict.json",
+  "title": "SAST Triage Verdict",
+  "description": "Structured output emitted by the sast-triage skill for a single scanner finding.",
+  "type": "object",
+  "required": [
+    "finding_id",
+    "verdict",
+    "confidence",
+    "vuln_class",
+    "audit_trail",
+    "agent_meta"
+  ],
+  "properties": {
+    "finding_id": {
+      "type": "string",
+      "description": "Stable identifier matching the orchestrator's findings table"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["triage", "hunt", "live"],
+      "description": "Absent mode is treated as triage."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "true_positive",
+        "true_positive_relocated",
+        "false_positive",
+        "stale_finding",
+        "indeterminate",
+        "error"
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Honest self-assessment. 0.0-0.4 forces escalation to human review."
+    },
+    "actual_sink_location": {
+      "type": "string",
+      "pattern": "^.+:[0-9]+$",
+      "description": "path:line. May differ from the flagged location when verdict == true_positive_relocated."
+    },
+    "vuln_class": {
+      "type": "string",
+      "description": "CWE identifier (e.g. CWE-22, CWE-918) or OWASP category"
+    },
+    "cvss_vector": {
+      "type": ["string", "null"],
+      "description": "CVSS 3.1 vector string. Required for verdicts starting with true_positive."
+    },
+    "taint_trace": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["step", "file", "line", "note"],
+        "properties": {
+          "step": {
+            "type": "string",
+            "enum": ["source", "transform", "sanitizer", "sink"]
+          },
+          "file": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "function": { "type": ["string", "null"] },
+          "note": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "sanitizers_in_path": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "file",
+          "line",
+          "function",
+          "applied_to",
+          "sufficient_for_class",
+          "reason"
+        ],
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "function": { "type": "string" },
+          "applied_to": { "type": "string" },
+          "sufficient_for_class": { "type": "boolean" },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "poc": {
+      "type": ["object", "null"],
+      "description": "Deprecated alias for proof (kind harness). New writers emit proof.",
+      "required": ["path", "command", "exit_code", "evidence_excerpt"],
+      "properties": {
+        "path": { "type": "string" },
+        "command": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "evidence_excerpt": { "type": "string", "minLength": 1 },
+        "sha1_pinned_sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "sha1"],
+            "properties": {
+              "path": { "type": "string" },
+              "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+            }
+          }
+        }
+      }
+    },
+    "proof": {
+      "type": ["object", "null"],
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["harness", "http_replay", "browser_trace", "sandbox_transcript"]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["exploited", "blocked"]
+        },
+        "artifact_uri": { "type": "string" },
+        "artifact_sha256": { "type": "string" },
+        "replay": {
+          "type": "object",
+          "properties": {
+            "command": { "type": "string" },
+            "exit_code": { "type": "integer" },
+            "passed": { "type": "boolean" },
+            "log_uri": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "blocker": {
+      "type": ["object", "null"],
+      "required": ["file", "line", "construct", "reasoning"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "construct": { "type": "string" },
+        "reasoning": { "type": "string", "minLength": 20 }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "counterevidence": { "type": "string" },
+    "chain_id": { "type": ["string", "null"] },
+    "preconditions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "blast_radius": {
+      "type": "string",
+      "enum": ["safe", "intrusive", "destructive"]
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "host": { "type": "string" },
+        "repo": { "type": "string" },
+        "sha": { "type": "string" }
+      }
+    },
+    "knowledge_used": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_id", "locator", "role"],
+        "properties": {
+          "source_id": { "type": "string" },
+          "locator": { "type": "string" },
+          "role": { "type": "string", "const": "hypothesis" }
+        }
+      }
+    },
+    "variants_observed": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "recommended_fix_location": {
+      "type": ["string", "null"],
+      "pattern": "^.+:[0-9]+$"
+    },
+    "recommended_fix_summary": { "type": ["string", "null"] },
+    "audit_trail": {
+      "type": "object",
+      "required": [
+        "files_read",
+        "commands_run",
+        "tool_call_count",
+        "wall_time_seconds"
+      ],
+      "properties": {
+        "files_read": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Each entry is path:start-end or path. Empty array is invalid in triage (reasoned from memory)."
+        },
+        "commands_run": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "tool_call_count": { "type": "integer", "minimum": 0 },
+        "wall_time_seconds": { "type": "number", "minimum": 0 }
+      }
+    },
+    "agent_meta": {
+      "type": "object",
+      "required": ["model", "posture", "pass_number"],
+      "properties": {
+        "model": { "type": "string" },
+        "posture": {
+          "type": "string",
+          "enum": ["argue_tp", "argue_fp", "hunt", "verify", "critic"]
+        },
+        "pass_number": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "session_id": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "anyOf": [
+          { "not": { "required": ["mode"] } },
+          {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "triage" } }
+          }
+        ]
+      },
+      "then": {
+        "required": [
+          "actual_sink_location",
+          "taint_trace",
+          "sanitizers_in_path"
+        ],
+        "properties": {
+          "audit_trail": {
+            "properties": {
+              "files_read": { "minItems": 1 }
+            }
+          },
+          "agent_meta": {
+            "properties": {
+              "posture": { "enum": ["argue_tp", "argue_fp"] }
+            }
+          }
+        }
+      },
+      "else": {
+        "required": ["proof", "scope"],
+        "properties": {
+          "proof": { "type": "object" },
+          "scope": {
+            "type": "object",
+            "required": ["repo", "sha"]
+          },
+          "agent_meta": {
+            "properties": {
+              "posture": { "enum": ["hunt", "verify", "critic"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["verdict"],
+        "properties": { "verdict": { "pattern": "^true_positive" } }
+      },
+      "then": {
+        "required": ["cvss_vector"],
+        "anyOf": [
+          {
+            "required": ["proof"],
+            "properties": { "proof": { "type": "object" } }
+          },
+          {
+            "required": ["poc"],
+            "properties": { "poc": { "type": "object" } }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": ["verdict"],
+        "properties": { "verdict": { "const": "false_positive" } }
+      },
+      "then": {
+        "required": ["blocker"],
+        "properties": {
+          "blocker": { "type": "object" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["mode", "verdict"],
+        "properties": {
+          "mode": { "enum": ["hunt", "live"] },
+          "verdict": { "pattern": "^true_positive" }
+        }
+      },
+      "then": {
+        "required": ["assumptions", "counterevidence"],
+        "properties": {
+          "proof": {
+            "type": "object",
+            "required": ["kind", "outcome"]
+          },
+          "counterevidence": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["verdict"],
+        "properties": { "verdict": { "const": "true_positive_relocated" } }
+      },
+      "then": {
+        "description": "actual_sink_location MUST differ from the flagged location (enforced by the verifier, not schema-expressible here)"
+      }
+    }
+  ]
+}
