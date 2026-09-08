@@ -23,6 +23,12 @@ VENV_PY     := $(VENV_DIR)/bin/python
 VENV_PIP    := $(VENV_DIR)/bin/pip
 
 TRIAGE_DB   ?= triage.db
+
+# A `"` inside an operator-supplied value would otherwise close the shell word
+# early and split one argv into several. Commas in the value are safe: subst
+# splits its own arguments before $1 expands.
+shquote = $(subst ",\",$1)
+
 # `serve` recipe knobs only. They export into the TRIAGE_API_* names the
 # entrypoint reads; nothing in Python looks at bare HOST / PORT.
 HOST        ?= 127.0.0.1
@@ -189,11 +195,7 @@ ingest:
 	@if [ -z "$(CSV)" ]; then \
 	  echo "ERROR: pass CSV=path/to/findings.csv"; exit 1; \
 	fi
-	@flags=""; \
-	if [ -n "$(DRY)" ]; then flags="$$flags --dry-run"; fi; \
-	if [ -n "$(EXCLUDE)" ]; then flags="$$flags --exclude-repos '$(EXCLUDE)'"; fi; \
-	if [ -n "$(NO_DEFAULT_EXCLUDES)" ]; then flags="$$flags --no-default-excludes"; fi; \
-	"$(VENV_PY)" -m triage.ingest --csv "$(CSV)" --db "$(TRIAGE_DB)" $$flags
+	@"$(VENV_PY)" -m triage.ingest --csv "$(CSV)" --db "$(TRIAGE_DB)" $(if $(DRY),--dry-run) $(if $(EXCLUDE),--exclude-repos "$(call shquote,$(EXCLUDE))") $(if $(NO_DEFAULT_EXCLUDES),--no-default-excludes)
 
 # ---------------------------------------------------------------------------
 # Access classification
@@ -223,11 +225,7 @@ classify-access:
 	@if [ ! -x "$(VENV_PY)" ]; then \
 	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
 	fi
-	@flags=""; \
-	if [ -n "$(COMMIT)" ]; then flags="$$flags --apply"; fi; \
-	if [ -n "$(HOSTS)" ]; then flags="$$flags --hosts '$(HOSTS)'"; fi; \
-	if [ -n "$(PROBE)" ]; then flags="$$flags --probe '$(PROBE)'"; fi; \
-	"$(VENV_PY)" -m triage.classify_access --db "$(TRIAGE_DB)" $$flags
+	@$(if $(HOSTS),TRIAGE_ACCESS_HOSTS="$(call shquote,$(HOSTS))") $(if $(PROBE),TRIAGE_ACCESS_PROBE="$(call shquote,$(PROBE))") "$(VENV_PY)" -m triage.classify_access --db "$(TRIAGE_DB)" $(if $(COMMIT),--apply)
 
 # ---------------------------------------------------------------------------
 # Recon / two-pass / harness verifier
