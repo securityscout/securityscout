@@ -11,6 +11,9 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
+# This file's directory. $(CURDIR) is the invocation cwd.
+MAKEFILE_DIR := $(patsubst %/,%,$(dir $(abspath $(firstword $(MAKEFILE_LIST)))))
+
 # Project-local venv at .venv/ to dodge PEP 668 on Homebrew Python. Every
 # triage.* invocation runs through VENV_PY; rules that need it bail with a
 # clear error when it's missing instead of silently using system python.
@@ -96,10 +99,7 @@ bootstrap-fallbacks:
 .PHONY: bootstrap-pip
 bootstrap-pip: bootstrap-venv
 	@echo "==> Installing Python dependencies into $(VENV_DIR)"
-	@"$(VENV_PIP)" install --upgrade \
-	  "jsonschema>=4.20" \
-	  "python-dotenv>=1.0" \
-	  "pytest>=8.0"
+	@"$(VENV_PIP)" install -e "$(MAKEFILE_DIR)[dev]"
 
 .PHONY: skill
 skill:
