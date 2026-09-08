@@ -48,7 +48,10 @@ help:
 	@echo "  clean-db             — delete $(TRIAGE_DB) (DESTRUCTIVE)"
 	@echo "  ingest CSV=path [DRY=1] [EXCLUDE=glob,…] — SAST CSV ingest"
 	@echo "  classify-access [COMMIT=1] [HOSTS=h1,h2] [PROBE=per_repo|membership] — flip rows between queued↔no_access via live API"
-	@echo "  recon|triage|verify-verdicts|report|calibrate — not yet implemented"
+	@echo "  recon                 — cache recon for REPO + SHA + WORKDIR"
+	@echo "  triage                — two-pass worker for FINDING_ID"
+	@echo "  verify-verdicts       — harness replay for FINDING_ID"
+	@echo "  report|calibrate      — not yet implemented"
 
 # ---------------------------------------------------------------------------
 # Bootstrap
@@ -214,11 +217,36 @@ classify-access:
 	"$(VENV_PY)" -m triage.classify_access --db "$(TRIAGE_DB)" $$flags
 
 # ---------------------------------------------------------------------------
-# Stubs — fail loudly until implemented.
+# Recon / two-pass / harness verifier
 # ---------------------------------------------------------------------------
 
-.PHONY: recon triage verify-verdicts report calibrate
+REPO ?=
+SHA ?=
+WORKDIR ?=
+FINDING_ID ?=
 
-recon triage verify-verdicts report calibrate:
+.PHONY: recon
+recon:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@"$(VENV_PY)" -m triage.recon --db "$(TRIAGE_DB)" --repo-url "$(REPO)" --sha "$(SHA)" --workdir "$(WORKDIR)"
+
+.PHONY: triage
+triage:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@"$(VENV_PY)" -m triage.triage_worker --db "$(TRIAGE_DB)" --finding-id "$(FINDING_ID)" $(if $(WORKDIR),--workdir "$(WORKDIR)",)
+
+.PHONY: verify-verdicts
+verify-verdicts:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@"$(VENV_PY)" -m triage.verifier --db "$(TRIAGE_DB)" --finding-id "$(FINDING_ID)" $(if $(WORKDIR),--workdir "$(WORKDIR)",)
+
+.PHONY: report calibrate
+report calibrate:
 	@echo "ERROR: '$@' is not yet implemented."
 	@exit 2

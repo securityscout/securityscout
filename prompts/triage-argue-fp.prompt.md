@@ -49,7 +49,9 @@ Bypasses you MUST consider before declaring FP (see the skill's bypass checklist
 
 ## Variable substitutions
 
-Same as `triage-argue-tp.prompt.md`.
+- `{{FINDING_ID}}`, `{{REPO_LOCAL}}`, `{{SHA}}`, `{{FILE}}`, `{{LINE}}`,
+  `{{RULE_ID}}`, `{{SEVERITY}}`, `{{DESCRIPTION}}`, `{{SCANNER_URL}}`,
+  `{{RECON_JSON}}` (inlined cached recon for the (repo, SHA))
 
 ## Output
 
