@@ -9,7 +9,12 @@ from pydantic import BaseModel
 
 from api.app import ApiError
 from triage import db
-from triage.status import REVIEW_TARGET, IllegalTransition, apply_transition
+from triage.status import (
+    REVIEW_TARGET,
+    IllegalTransition,
+    TransitionConflict,
+    cas_status,
+)
 
 router = APIRouter()
 
@@ -94,11 +99,9 @@ def review_finding(finding_id: str, body: ReviewIn, request: Request) -> dict[st
     with db.session(request.app.state.db_path) as conn:
         row = _get_finding(conn, finding_id)
         try:
-            apply_transition(row["status"], target)
+            cas_status(conn, finding_id, row["status"], target)
         except IllegalTransition as exc:
             raise ApiError(409, "illegal_transition", str(exc)) from exc
-        conn.execute(
-            "UPDATE findings SET status = ? WHERE id = ?",
-            (target, finding_id),
-        )
+        except TransitionConflict as exc:
+            raise ApiError(409, "conflict", str(exc)) from exc
     return {"id": finding_id, "status": target}

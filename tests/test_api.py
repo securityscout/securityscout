@@ -30,6 +30,34 @@ def _client(db_path: Path):
     return TestClient(create_app(db_path))
 
 
+def _seed_finding(db_path: Path, finding_id: str, status: str) -> None:
+    with db.session(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO findings (
+              id, repo_url, sha, rule_id, file, line, status, source_kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'sast_csv')
+            """,
+            (
+                finding_id,
+                "https://github.com/acme/app.git",
+                "deadbeefcafebabedeadbeefcafebabe",
+                "rule.x",
+                "src/a.py",
+                1,
+                status,
+            ),
+        )
+
+
+def _status_of(db_path: Path, finding_id: str) -> str:
+    with db.session(db_path) as conn:
+        row = conn.execute(
+            "SELECT status FROM findings WHERE id = ?", (finding_id,)
+        ).fetchone()
+    return row["status"]
+
+
 def test_create_engagement_create_run_list_findings_replay_202(
     tmp_path: Path,
 ) -> None:
@@ -185,3 +213,109 @@ def test_module_main_refuses_non_loopback_without_token() -> None:
     assert "0.0.0.0" in output
     assert "ImportError" not in output
     assert "Address already in use" not in output
+
+
+def test_review_accept_publishes(tmp_path: Path) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_finding(db_path, "f1", "needs_review")
+
+    resp = client.post("/findings/f1/review", json={"action": "accept"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"id": "f1", "status": "published"}
+    assert _status_of(db_path, "f1") == "published"
+
+
+@pytest.mark.parametrize("action", ["reject", "accept_risk"])
+def test_review_reject_and_accept_risk_close(tmp_path: Path, action: str) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_finding(db_path, "f1", "needs_review")
+
+    resp = client.post("/findings/f1/review", json={"action": action})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"id": "f1", "status": "done"}
+    assert _status_of(db_path, "f1") == "done"
+
+
+def test_review_illegal_transition_leaves_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_finding(db_path, "f1", "done")
+
+    resp = client.post("/findings/f1/review", json={"action": "accept"})
+
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error"] == "illegal_transition"
+    assert "done" in body["detail"]
+    assert "published" in body["detail"]
+    assert _status_of(db_path, "f1") == "done"
+
+
+def test_review_unknown_action_400(tmp_path: Path) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_finding(db_path, "f1", "needs_review")
+
+    resp = client.post("/findings/f1/review", json={"action": "burn"})
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+    assert _status_of(db_path, "f1") == "needs_review"
+
+
+def test_review_missing_finding_404(tmp_path: Path) -> None:
+    client = _client(tmp_path / "api.db")
+
+    resp = client.post("/findings/nope/review", json={"action": "accept"})
+
+    assert resp.status_code == 404
+    assert resp.json()["error"] == "not_found"
+
+
+def test_review_lost_race_returns_409_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Someone else moves the row between the handler's SELECT and its write.
+
+    Autocommit commits the flip immediately, so the handler's own
+    `row["status"]` is stale by the time it reaches the write.
+    """
+    from api import routes_findings
+
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_finding(db_path, "f1", "needs_review")
+
+    real_get_finding = routes_findings._get_finding
+
+    def racing_get_finding(conn, finding_id):
+        row = real_get_finding(conn, finding_id)
+        conn.execute("UPDATE findings SET status = 'done' WHERE id = ?", (finding_id,))
+        return row
+
+    monkeypatch.setattr(routes_findings, "_get_finding", racing_get_finding)
+
+    resp = client.post("/findings/f1/review", json={"action": "accept"})
+
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error"] == "conflict"
+    assert "f1" in body["detail"]
+    assert "needs_review" in body["detail"]
+    assert _status_of(db_path, "f1") == "done"
+
+
+def test_review_route_writes_through_cas_status() -> None:
+    import inspect
+
+    from api import routes_findings
+
+    source = inspect.getsource(routes_findings.review_finding)
+
+    assert "cas_status(" in source
+    assert "apply_transition" not in source
+    assert "UPDATE findings" not in source
