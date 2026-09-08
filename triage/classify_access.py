@@ -5,8 +5,8 @@ whether the configured user can read it, and update `status`:
 
     queued     → no_access   (lost or never had access)
     no_access  → queued      (access regained; e.g., membership granted)
-    queued     → queued      (still accessible)
-    no_access  → no_access   (still inaccessible)
+    queued     → queued      (still accessible, or unprobeable)
+    no_access  → no_access   (still inaccessible, or unprobeable)
 
 Sticky statuses (excluded, triaging, verifying, done, error,
 indeterminate, stale) are never touched. `excluded` in particular is a
@@ -24,14 +24,19 @@ predicate interface:
   then set lookup against `path_with_namespace`. Cheap but only sees
   *direct* membership; misses inheritance and redirects.
 
-Hosts NOT listed in TRIAGE_ACCESS_HOSTS are treated as `no_access`
-regardless of strategy (no auth surface is wired up for them).
+Hosts NOT listed in TRIAGE_ACCESS_HOSTS have no auth surface wired up,
+so they cannot be probed at all and their rows are left alone.
 
 The probe is injectable as `is_repo_accessible: (host, path) -> bool | None`
 so tests run fully offline:
   * True  → accessible (queued)
   * False → not accessible (no_access)
-  * None  → unknown / unconfigured host (no_access + tracked separately)
+  * None  → could not ask (row keeps its status, tracked separately)
+
+Writing `no_access` takes an explicit `False`. A host nobody can probe,
+an ambiguous probe, and an unparseable `repo_url` all leave the row
+untouched — silently marking them inaccessible is indistinguishable
+from a real access loss.
 
 CLI:
     python -m triage.classify_access [--apply] [--db triage.db]
@@ -59,9 +64,12 @@ from triage.config import CONFIG
 from triage.db import connect, init_schema
 
 
-# Hosts for which we know how to consult a live access API.
-# Override with TRIAGE_ACCESS_HOSTS; empty env list probes nothing.
-DEFAULT_ACCESS_HOSTS: tuple[str, ...] = ("github.com",)
+# Hosts for which we know how to consult a live access API. Empty by
+# default: `glab` is the only probe implemented, and listing a host it
+# cannot answer for would classify that host's repos on a probe that
+# never runs. Set TRIAGE_ACCESS_HOSTS once the matching auth surface
+# exists.
+DEFAULT_ACCESS_HOSTS: tuple[str, ...] = ()
 
 # Only rows in these statuses are reclassifiable. Everything else is sticky
 # (a user/orchestrator decision classify_access must not override).
@@ -93,9 +101,10 @@ class ClassifyStats:
     # Repos that resolved to a host not in TRIAGE_ACCESS_HOSTS.
     unknown_host_repos: dict[str, int] = field(default_factory=dict)
     # Per-repo probe only: how many times the predicate returned None on
-    # a *configured* host. These get treated as no_access but the user
-    # should investigate (transient API error, rate limit, etc.).
+    # a *configured* host — transient API error, rate limit, etc.
     probe_errors: dict[str, int] = field(default_factory=dict)
+    # Unique repo_url values that did not parse into (host, path).
+    unparseable_repos: int = 0
 
     flipped_to_queued: list[tuple[str, int]] = field(default_factory=list)
     flipped_to_no_access: list[tuple[str, int]] = field(default_factory=list)
@@ -183,8 +192,8 @@ def _fetch_member_paths(host: str) -> set[str]:
 def _probe_repo(host: str, path: str) -> bool | None:
     """Single-project access probe via `glab api /projects/<encoded_path>`.
 
-    Returns True (200), False (404/403), or None (anything else — caller
-    should treat as no_access but log).
+    Returns True (200), False (404/403), or None (anything else — the
+    caller leaves the row alone and reports the host).
 
     GitLab returns 404 (not 403) for projects the caller can't read, by
     design (info-leak hardening). 403 is still handled defensively in
@@ -244,7 +253,7 @@ def make_per_repo_predicate(
     probes that come back ambiguous on configured hosts feed
     `probe_errors` — kept as separate buckets so the end-of-run summary
     can tell "host I can't talk to" apart from "host I can, but this
-    one call failed".
+    one call failed". Both return `None`, which leaves the row alone.
     """
     hosts_set = {h.lower() for h in hosts}
 
@@ -310,7 +319,7 @@ def classify_access(
 
         # Predicate is called once per unique repo_url — critical so the
         # per_repo probe scales with #repos, not #findings.
-        decisions: dict[str, str] = {}
+        decisions: dict[str, str | None] = {}
         flip_q_by_repo: dict[str, int] = {}
         flip_n_by_repo: dict[str, int] = {}
         to_update: list[tuple[str, str]] = []  # (new_status, finding_id)
@@ -323,12 +332,15 @@ def classify_access(
             elif current == "no_access":
                 stats.no_access_before += 1
 
-            decision = decisions.get(repo_url)
-            if decision is None:
-                decision = _decide_for_repo(repo_url, is_repo_accessible)
-                decisions[repo_url] = decision
+            # `None` is a cached decision of its own ("could not ask"), so
+            # membership decides the cache hit, not truthiness.
+            if repo_url not in decisions:
+                decisions[repo_url] = _decide_for_repo(
+                    repo_url, is_repo_accessible, stats,
+                )
+            decision = decisions[repo_url]
 
-            if decision != current:
+            if decision is not None and decision != current:
                 to_update.append((decision, r["id"]))
                 bucket = flip_q_by_repo if decision == "queued" else flip_n_by_repo
                 bucket[repo_url] = bucket.get(repo_url, 0) + 1
@@ -348,15 +360,24 @@ def classify_access(
     return stats
 
 
-def _decide_for_repo(repo_url: str, is_repo_accessible: AccessPredicate) -> str:
-    """Only `True` reaches `queued`; `False` and `None` both collapse to
-    `no_access`. The predicate owns any per-host diagnostics
-    bookkeeping (unknown_host_repos, probe_errors)."""
+def _decide_for_repo(
+    repo_url: str, is_repo_accessible: AccessPredicate, stats: ClassifyStats,
+) -> str | None:
+    """`True` → queued, `False` → no_access, `None` → leave the row alone.
+
+    The predicate owns the per-host diagnostics (unknown_host_repos,
+    probe_errors); an unparseable URL never reaches it, so it is counted
+    here instead.
+    """
     parsed = repo_url_to_path(repo_url)
     if parsed is None:
-        return "no_access"
+        stats.unparseable_repos += 1
+        return None
     host, path = parsed
-    return "queued" if is_repo_accessible(host, path) is True else "no_access"
+    outcome = is_repo_accessible(host, path)
+    if outcome is None:
+        return None
+    return "queued" if outcome else "no_access"
 
 
 # ---------------------------------------------------------------------------
@@ -399,15 +420,19 @@ def _print_stats(stats: ClassifyStats, *, apply: bool, db_path: Path,
 
     if stats.unknown_host_repos:
         print()
-        print("  repos on unconfigured hosts (treated as no_access):")
+        print("  repos on unconfigured hosts (left unchanged):")
         for host, n in sorted(stats.unknown_host_repos.items(), key=lambda kv: -kv[1]):
             print(f"    {n:>4}  {host}  (add to TRIAGE_ACCESS_HOSTS to enable live check)")
 
     if stats.probe_errors:
         print()
-        print("  per-repo probe errors (treated as no_access; investigate):")
+        print("  per-repo probe errors (left unchanged; investigate):")
         for host, n in sorted(stats.probe_errors.items(), key=lambda kv: -kv[1]):
             print(f"    {n:>4}  {host}")
+
+    if stats.unparseable_repos:
+        print()
+        print(f"  unparseable repo_url values (left unchanged):  {stats.unparseable_repos}")
 
     print()
     if apply:
@@ -424,7 +449,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Write changes. Default is dry-run.")
     parser.add_argument("--hosts", default="",
                         help="Override TRIAGE_ACCESS_HOSTS (comma-separated). "
-                             "Hosts not in the list default to no_access.")
+                             "Repos on other hosts are left unchanged.")
     parser.add_argument("--probe", default=None, choices=VALID_PROBES,
                         help=f"Probe strategy (default: env TRIAGE_ACCESS_PROBE "
                              f"or {DEFAULT_PROBE}).")

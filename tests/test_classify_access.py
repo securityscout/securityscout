@@ -128,20 +128,19 @@ class TestClassifyAccess:
             row = conn.execute("SELECT status FROM findings WHERE id='b'").fetchone()
         assert row["status"] == "no_access"
 
-    def test_predicate_returning_none_flips_to_no_access(
+    def test_predicate_returning_none_leaves_status_unchanged(
         self, tmp_db_path: Path,
     ) -> None:
-        """Predicate=None means "treat as inaccessible" — the row flips to
-        no_access. Strategy-level diagnostic bookkeeping (which bucket
-        the None feeds) is covered in TestMembershipPredicate /
-        TestPerRepoPredicate."""
+        """`None` is "I could not ask", not "inaccessible" — the row keeps
+        whatever status it had, in both directions. Only an explicit
+        False writes no_access."""
         db.init_schema(tmp_db_path)
         with db.session(tmp_db_path) as conn:
             _insert_finding(conn, fid="c1", sf_id="3",
                             repo_url="https://gitlab.com/acme/salesforce/salesforce")
             _insert_finding(conn, fid="c2", sf_id="4",
                             repo_url="https://bitbucket.org/thirddoormedia/site")
-            _insert_finding(conn, fid="c3", sf_id="5",
+            _insert_finding(conn, fid="c3", sf_id="5", status="no_access",
                             repo_url="https://github.com/owner/repo")
 
         pred = _predicate_from_table({}, default=None)
@@ -149,14 +148,96 @@ class TestClassifyAccess:
             db_path=tmp_db_path, apply=True,
             hosts=("gitlab.example.com",), is_repo_accessible=pred,
         )
-        assert stats.no_access_after == 3
-        # A raw injected predicate is not a strategy and owns no
-        # diagnostics — the bucket stays empty here.
-        assert stats.unknown_host_repos == {}
+        assert stats.flipped_to_no_access == []
+        assert stats.flipped_to_queued == []
+        assert stats.queued_after == 2
+        assert stats.no_access_after == 1
 
         with db.session(tmp_db_path) as conn:
             rows = conn.execute("SELECT id, status FROM findings ORDER BY id").fetchall()
-        assert all(r["status"] == "no_access" for r in rows)
+        assert [r["status"] for r in rows] == ["queued", "queued", "no_access"]
+
+    def test_unknown_host_is_counted_and_not_flipped(
+        self, tmp_db_path: Path,
+    ) -> None:
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            _insert_finding(conn, fid="u1", sf_id="20",
+                            repo_url="https://github.com/owner/repo")
+
+        stats = ca.classify_access(
+            db_path=tmp_db_path, apply=True, hosts=("gitlab.example.com",),
+        )
+        assert stats.unknown_host_repos == {"github.com": 1}
+        assert stats.flipped_to_no_access == []
+
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute("SELECT status FROM findings WHERE id = 'u1'").fetchone()
+        assert row["status"] == "queued"
+
+    def test_unparseable_repo_url_leaves_status_unchanged(
+        self, tmp_db_path: Path,
+    ) -> None:
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            _insert_finding(conn, fid="p1", sf_id="21", repo_url="not-a-url")
+
+        pred = _predicate_from_table({}, default=False)
+        stats = ca.classify_access(
+            db_path=tmp_db_path, apply=True,
+            hosts=("gitlab.example.com",), is_repo_accessible=pred,
+        )
+        assert stats.unparseable_repos == 1
+        assert stats.flipped_to_no_access == []
+
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute("SELECT status FROM findings WHERE id = 'p1'").fetchone()
+        assert row["status"] == "queued"
+
+    def test_probe_error_on_configured_host_leaves_status_unchanged(
+        self, tmp_db_path: Path,
+    ) -> None:
+        """The configured-host half of the rule: a probe that cannot answer
+        is not a negative, so the row keeps its status and the host lands
+        in probe_errors rather than in a flip list."""
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            _insert_finding(conn, fid="e1", sf_id="23",
+                            repo_url="https://gitlab.example.com/acme/app")
+
+        stats = ca.ClassifyStats(probe=ca.PROBE_PER_REPO)
+        pred = ca.make_per_repo_predicate(
+            ("gitlab.example.com",), probe=lambda _h, _p: None, stats=stats,
+        )
+        returned = ca.classify_access(
+            db_path=tmp_db_path, apply=True,
+            hosts=("gitlab.example.com",), is_repo_accessible=pred,
+        )
+        assert stats.probe_errors == {"gitlab.example.com": 1}
+        assert returned.flipped_to_no_access == []
+
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute("SELECT status FROM findings WHERE id = 'e1'").fetchone()
+        assert row["status"] == "queued"
+
+    def test_explicit_false_still_flips_to_no_access(
+        self, tmp_db_path: Path,
+    ) -> None:
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            _insert_finding(conn, fid="f1", sf_id="22",
+                            repo_url="https://gitlab.example.com/acme/app")
+
+        pred = _predicate_from_table({}, default=False)
+        stats = ca.classify_access(
+            db_path=tmp_db_path, apply=True,
+            hosts=("gitlab.example.com",), is_repo_accessible=pred,
+        )
+        assert stats.no_access_after == 1
+
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute("SELECT status FROM findings WHERE id = 'f1'").fetchone()
+        assert row["status"] == "no_access"
 
     def test_no_access_promoted_back_when_predicate_now_true(
         self, tmp_db_path: Path,
@@ -469,9 +550,11 @@ class TestProbeRepo:
 # ---------------------------------------------------------------------------
 
 class TestHostsToCheck:
-    def test_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Shipping a host with no working probe marks its rows no_access.
         monkeypatch.delenv("TRIAGE_ACCESS_HOSTS", raising=False)
-        assert ca.hosts_to_check() == ca.DEFAULT_ACCESS_HOSTS
+        assert ca.DEFAULT_ACCESS_HOSTS == ()
+        assert ca.hosts_to_check() == ()
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TRIAGE_ACCESS_HOSTS", "gitlab.example.com, github.com ")
