@@ -23,6 +23,10 @@ VENV_PY     := $(VENV_DIR)/bin/python
 VENV_PIP    := $(VENV_DIR)/bin/pip
 
 TRIAGE_DB   ?= triage.db
+# `serve` recipe knobs only. They export into the TRIAGE_API_* names the
+# entrypoint reads; nothing in Python looks at bare HOST / PORT.
+HOST        ?= 127.0.0.1
+PORT        ?= 8000
 SKILL_HOME  ?= $(HOME)/.cursor/skills/sast-triage
 SKILL_FILE  := $(SKILL_HOME)/SKILL.md
 # Vendored, polyglot-expanded skill source — checked in so this tool isn't
@@ -43,11 +47,13 @@ help:
 	@echo "  bootstrap-pip        — install Python deps into .venv"
 	@echo "  schema               — create SQLite schema at $(TRIAGE_DB)"
 	@echo "  verify               — bootstrap acceptance gate; exit 0 = ready to ingest"
+	@echo "  serve [HOST=h] [PORT=p] — run the control-plane API (non-loopback HOST needs TRIAGE_API_TOKEN)"
 	@echo "  test                 — run pytest + web tests + web production build"
 	@echo "  test-py              — run pytest suite"
 	@echo "  test-web             — run web Vitest + typecheck + Vite build"
 	@echo "  build                — web production build (typecheck + Vite)"
 	@echo "  skill                — (re)install ~/.cursor/skills/sast-triage/SKILL.md"
+	@echo "  check-agent-config   — drift guards for .claude/ rules and skills (no-op without .claude/)"
 	@echo "  clean-db             — delete $(TRIAGE_DB) (DESTRUCTIVE)"
 	@echo "  ingest CSV=path [DRY=1] [EXCLUDE=glob,…] — SAST CSV ingest"
 	@echo "  classify-access [COMMIT=1] [HOSTS=h1,h2] [PROBE=per_repo|membership] — flip rows between queued↔no_access via live API"
@@ -131,6 +137,13 @@ verify:
 	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
 	fi
 	@"$(VENV_PY)" -m triage.verify
+
+.PHONY: serve
+serve:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@TRIAGE_API_HOST="$(HOST)" TRIAGE_API_PORT="$(PORT)" "$(VENV_PY)" -m api
 
 .PHONY: test test-py test-web build
 test: test-py test-web
@@ -245,6 +258,17 @@ verify-verdicts:
 	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
 	fi
 	@"$(VENV_PY)" -m triage.verifier --db "$(TRIAGE_DB)" --finding-id "$(FINDING_ID)" $(if $(WORKDIR),--workdir "$(WORKDIR)",)
+
+.PHONY: check-agent-config
+# .claude/ is gitignored, so this is a no-op for anyone who does not have it.
+check-agent-config:
+	@if [ ! -d .claude ]; then \
+	  echo "skip: no .claude/ in this checkout"; \
+	elif [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	else \
+	  "$(VENV_PY)" -m pytest .claude/check_config.py -q -p no:cacheprovider; \
+	fi
 
 .PHONY: report calibrate
 report calibrate:

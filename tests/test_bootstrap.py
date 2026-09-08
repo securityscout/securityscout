@@ -45,7 +45,12 @@ def test_dev_extra_declares_httpx() -> None:
     assert re.search(r'"httpx>=0\.28"', extra)
 
 
-def test_no_uvicorn_without_serve() -> None:
-    makefile = _makefile()
-    assert not re.search(r"^serve:", makefile, flags=re.MULTILINE)
-    assert "uvicorn" not in _pyproject()
+def test_serve_declares_uvicorn() -> None:
+    assert re.search(r"^serve:", _makefile(), flags=re.MULTILINE)
+    block = re.search(
+        r"^dependencies\s*=\s*\[(.*?)\]",
+        _pyproject(),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert block is not None, "[project] dependencies missing"
+    assert "uvicorn" in block.group(1)

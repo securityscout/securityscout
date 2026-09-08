@@ -2,9 +2,32 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
 from triage import db
+from triage.config import REPO_ROOT
+
+
+@pytest.fixture(autouse=True)
+def _loopback_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pytest must never need an exported token or a bound address."""
+    monkeypatch.delenv("TRIAGE_API_TOKEN", raising=False)
+    monkeypatch.delenv("TRIAGE_API_HOST", raising=False)
+    monkeypatch.delenv("TRIAGE_API_PORT", raising=False)
+
+
+def _client(db_path: Path):
+    from fastapi.testclient import TestClient
+
+    from api.app import create_app
+
+    db.init_schema(db_path)
+    return TestClient(create_app(db_path))
 
 
 def test_create_engagement_create_run_list_findings_replay_202(
@@ -75,3 +98,90 @@ def test_create_engagement_create_run_list_findings_replay_202(
     assert body["finding_id"] == "f1"
     assert body["replay_status"] == "queued"
     assert "passed" not in body
+
+
+def test_token_set_requires_bearer_on_routers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRIAGE_API_TOKEN", "s3cret")
+    client = _client(tmp_path / "api.db")
+    payload = {"name": "acme-web", "org": "acme", "policy_json": {}}
+
+    unauthenticated = client.post("/engagements", json=payload)
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json() == {
+        "error": "unauthorized",
+        "detail": "invalid or missing token",
+    }
+
+    wrong = client.post(
+        "/engagements", json=payload, headers={"Authorization": "Bearer nope"}
+    )
+    assert wrong.status_code == 401
+    assert wrong.json()["error"] == "unauthorized"
+
+    good = client.post(
+        "/engagements", json=payload, headers={"Authorization": "Bearer s3cret"}
+    )
+    assert good.status_code == 201
+    assert good.json()["name"] == "acme-web"
+
+
+def test_health_open_when_token_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRIAGE_API_TOKEN", "s3cret")
+    client = _client(tmp_path / "api.db")
+
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json() == {"ok": True}
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+def test_check_bind_allows_loopback_without_token(host: str) -> None:
+    from api.__main__ import check_bind
+
+    check_bind(host, None)
+    check_bind(host, "")
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "*", "10.0.0.4", "api.internal"])
+def test_check_bind_refuses_non_loopback_without_token(host: str) -> None:
+    from api.__main__ import check_bind
+
+    for token in (None, ""):
+        with pytest.raises(RuntimeError) as raised:
+            check_bind(host, token)
+        message = str(raised.value)
+        assert "TRIAGE_API_TOKEN" in message
+        assert host in message
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "0.0.0.0", "10.0.0.4"])
+def test_check_bind_allows_any_host_with_token(host: str) -> None:
+    from api.__main__ import check_bind
+
+    check_bind(host, "s3cret")
+
+
+def test_module_main_refuses_non_loopback_without_token() -> None:
+    # Blank, not absent: python-dotenv skips keys already in the environment,
+    # so this also stops a developer's .env token from making the child bind.
+    env = dict(os.environ, TRIAGE_API_TOKEN="", TRIAGE_API_HOST="0.0.0.0")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "api"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert proc.returncode != 0
+    output = proc.stdout + proc.stderr
+    assert "TRIAGE_API_TOKEN" in output
+    assert "0.0.0.0" in output
+    assert "ImportError" not in output
+    assert "Address already in use" not in output
