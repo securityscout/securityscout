@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import os
 import subprocess
 import sys
@@ -47,6 +48,22 @@ def _seed_finding(db_path: Path, finding_id: str, status: str) -> None:
                 1,
                 status,
             ),
+        )
+
+
+def _seed_run(db_path: Path, run_id: str, status: str = "queued") -> None:
+    with db.session(db_path) as conn:
+        conn.execute(
+            "INSERT INTO engagements (id, name, org, policy_json, created_at) "
+            "VALUES ('e1', 'acme-web', 'acme', '{}', '2026-09-08T00:00:00+00:00')"
+        )
+        conn.execute(
+            """
+            INSERT INTO runs (
+              id, engagement_id, mode, playbook, repo, sha, status, budget_spent_usd
+            ) VALUES (?, 'e1', 'triage', 'web-app.v1', 'acme/app', 'deadbeef', ?, 0)
+            """,
+            (run_id, status),
         )
 
 
@@ -319,3 +336,124 @@ def test_review_route_writes_through_cas_status() -> None:
     assert "cas_status(" in source
     assert "apply_transition" not in source
     assert "UPDATE findings" not in source
+
+
+def test_validation_detail_names_the_field(tmp_path: Path) -> None:
+    client = _client(tmp_path / "api.db")
+
+    resp = client.post("/engagements", json={"org": "acme"})
+
+    assert resp.status_code == 400
+    assert resp.json() == {
+        "error": "invalid_request",
+        "detail": "body.name: Field required",
+    }
+
+
+def test_validation_detail_reports_a_wrong_type(tmp_path: Path) -> None:
+    client = _client(tmp_path / "api.db")
+
+    resp = client.post("/engagements", json={"name": 1, "org": "acme"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "body.name: Input should be a valid string"
+
+
+def test_validation_detail_leaks_no_path_or_input(tmp_path: Path) -> None:
+    client = _client(tmp_path / "api.db")
+    sentinel = "zqx-leak-canary-42"
+
+    resp = client.post(
+        "/engagements",
+        json={"name": {"tok": sentinel}, "org": "acme", "policy_json": {}},
+    )
+
+    assert resp.status_code == 400
+    body = resp.text
+    assert str(REPO_ROOT) not in body
+    assert 'File "' not in body
+    assert getpass.getuser() not in body
+    assert "errors.pydantic.dev" not in body
+    assert sentinel not in body
+
+
+def test_validation_detail_joins_every_error(tmp_path: Path) -> None:
+    client = _client(tmp_path / "api.db")
+
+    resp = client.put("/policies", json={})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "; ".join(
+        f"body.{field}: Field required"
+        for field in ("scope", "blast_radius", "budget", "models", "auto_publish")
+    )
+
+
+def test_validation_handler_does_not_stringify_the_exception() -> None:
+    import inspect
+
+    from api import app as app_module
+
+    assert "str(exc)" not in inspect.getsource(app_module)
+
+
+def test_run_events_is_503_with_retry_after(tmp_path: Path) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_run(db_path, "r1")
+
+    resp = client.get("/runs/r1/events")
+
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "unavailable"
+    assert resp.headers["retry-after"] == "5"
+    assert resp.headers["content-type"].startswith("application/json")
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "done", "cancelled"])
+def test_run_events_503_for_every_run_status(tmp_path: Path, status: str) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_run(db_path, "r1")
+    with db.session(db_path) as conn:
+        conn.execute("UPDATE runs SET status = ? WHERE id = 'r1'", (status,))
+
+    resp = client.get("/runs/r1/events")
+
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "unavailable"
+
+
+def test_run_events_unknown_run_is_404(tmp_path: Path) -> None:
+    client = _client(tmp_path / "api.db")
+
+    resp = client.get("/runs/nope/events")
+
+    assert resp.status_code == 404
+    assert resp.json()["error"] == "not_found"
+    assert "retry-after" not in resp.headers
+
+
+def test_run_events_401_before_503_when_token_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRIAGE_API_TOKEN", "s3cret")
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_run(db_path, "r1")
+
+    resp = client.get("/runs/r1/events")
+
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "unauthorized"
+
+
+def test_run_events_no_longer_streams() -> None:
+    import inspect
+
+    from api import routes_runs
+
+    source = inspect.getsource(routes_runs)
+
+    assert "StreamingResponse" not in source
+    assert "AsyncIterator" not in source

@@ -1,15 +1,15 @@
-"""Run enqueue, cancel, and event stream."""
+"""Run enqueue, cancel, and run events."""
 
 from __future__ import annotations
 
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from api.app import ApiError
+from api.app import ApiError, error_response
 from api.routes_engagements import get_engagement
 from triage import db
 
@@ -97,12 +97,18 @@ def cancel_run(run_id: str, request: Request) -> dict[str, str]:
 
 
 @router.get("/runs/{run_id}/events")
-def run_events(run_id: str, request: Request) -> StreamingResponse:
+def run_events(run_id: str, request: Request) -> JSONResponse:
+    """No worker emits envelopes yet, so every existing run is unavailable.
+
+    An empty 200 looks like a dropped stream and `EventSource` reconnects on
+    it forever; a 503 is a permanent failure the client must act on.
+    """
     with db.session(request.app.state.db_path) as conn:
         _get_run(conn, run_id)
 
-    async def _empty() -> AsyncIterator[bytes]:
-        if False:  # pragma: no cover
-            yield b""
-
-    return StreamingResponse(_empty(), media_type="text/event-stream")
+    return error_response(
+        503,
+        "unavailable",
+        "run event stream is not available yet",
+        headers={"Retry-After": "5"},
+    )
