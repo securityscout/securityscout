@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { createRoute, Link } from "@tanstack/react-router";
+import { createRoute, Link, useNavigate } from "@tanstack/react-router";
 import {
   createColumnHelper,
   flexRender,
@@ -8,10 +8,45 @@ import {
 } from "@tanstack/react-table";
 import { useEffect, useState } from "react";
 
-import { type Finding, findingsForEngagement } from "../fixtures";
+import { ApiError, apiRequest } from "../api";
+import { findingById, findingsForEngagement } from "../fixtures";
 import { rootRoute } from "./__root";
 
-const columnHelper = createColumnHelper<Finding>();
+type KernelFinding = {
+  id: string;
+  repo_url: string;
+  sha: string;
+  rule_id: string;
+  file: string;
+  line: number;
+  status: string;
+  run_id: string;
+  source_kind: string;
+};
+
+type Row = KernelFinding & { severity: string; vuln_class: string };
+
+function asApiError(err: unknown): ApiError {
+  return err instanceof ApiError ? err : new ApiError(0, "unavailable", "");
+}
+
+function toRow(kernel: KernelFinding): Row {
+  const fixture = findingById(kernel.id);
+  return {
+    ...kernel,
+    severity: fixture?.severity ?? "",
+    vuln_class: fixture?.vuln_class ?? "",
+  };
+}
+
+async function fetchFindings(engId: string): Promise<Row[]> {
+  const data = await apiRequest<{ findings: KernelFinding[] }>(
+    `/findings?engagement_id=${encodeURIComponent(engId)}`,
+  );
+  return data.findings.map(toRow);
+}
+
+const columnHelper = createColumnHelper<Row>();
 
 const columns = [
   columnHelper.accessor("id", { header: "ID" }),
@@ -28,10 +63,16 @@ const columns = [
 
 export function EngagementPage() {
   const { engId } = engagementRoute.useParams();
-  const { data: rows } = useQuery({
+  const navigate = useNavigate();
+  const {
+    data: rows,
+    error,
+    isError,
+  } = useQuery({
     queryKey: ["findings", engId],
-    queryFn: () => findingsForEngagement(engId),
-    initialData: () => findingsForEngagement(engId),
+    queryFn: () => fetchFindings(engId),
+    initialData: () => findingsForEngagement(engId).map(toRow),
+    staleTime: 0,
   });
   const [selectedId, setSelectedId] = useState(rows[0]?.id ?? "");
   if (rows.length > 0 && !rows.some((row) => row.id === selectedId)) {
@@ -49,7 +90,7 @@ export function EngagementPage() {
       if (event.metaKey || event.ctrlKey || event.altKey) {
         return;
       }
-      if (event.key !== "j" && event.key !== "k") {
+      if (event.key !== "j" && event.key !== "k" && event.key !== "Enter") {
         return;
       }
       if (document.querySelector('[role="dialog"]')) {
@@ -63,6 +104,15 @@ export function EngagementPage() {
         return;
       }
       event.preventDefault();
+      if (event.key === "Enter") {
+        if (selectedId) {
+          navigate({
+            to: "/findings/$findingId",
+            params: { findingId: selectedId },
+          });
+        }
+        return;
+      }
       setSelectedId((current) => {
         const index = rows.findIndex((row) => row.id === current);
         const next =
@@ -74,46 +124,56 @@ export function EngagementPage() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [rows]);
+  }, [rows, selectedId, navigate]);
 
   return (
-    <table>
-      <thead>
-        {table.getHeaderGroups().map((group) => (
-          <tr key={group.id}>
-            {group.headers.map((header) => (
-              <th key={header.id}>
-                {flexRender(header.column.columnDef.header, header.getContext())}
-              </th>
-            ))}
-          </tr>
-        ))}
-      </thead>
-      <tbody>
-        {table.getRowModel().rows.map((row) => (
-          <tr
-            key={row.id}
-            aria-selected={row.original.id === selectedId}
-            onClick={() => setSelectedId(row.original.id)}
-          >
-            {row.getVisibleCells().map((cell) => (
-              <td key={cell.id}>
-                {cell.column.id === "id" ? (
-                  <Link
-                    to="/findings/$findingId"
-                    params={{ findingId: row.original.id }}
-                  >
-                    {row.original.id}
-                  </Link>
-                ) : (
-                  flexRender(cell.column.columnDef.cell, cell.getContext())
-                )}
-              </td>
-            ))}
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <>
+      {isError ? (
+        <p role="alert">
+          {asApiError(error).error} {asApiError(error).detail}
+        </p>
+      ) : null}
+      <table>
+        <thead>
+          {table.getHeaderGroups().map((group) => (
+            <tr key={group.id}>
+              {group.headers.map((header) => (
+                <th key={header.id}>
+                  {flexRender(
+                    header.column.columnDef.header,
+                    header.getContext(),
+                  )}
+                </th>
+              ))}
+            </tr>
+          ))}
+        </thead>
+        <tbody>
+          {table.getRowModel().rows.map((row) => (
+            <tr
+              key={row.id}
+              aria-selected={row.original.id === selectedId}
+              onClick={() => setSelectedId(row.original.id)}
+            >
+              {row.getVisibleCells().map((cell) => (
+                <td key={cell.id}>
+                  {cell.column.id === "id" ? (
+                    <Link
+                      to="/findings/$findingId"
+                      params={{ findingId: row.original.id }}
+                    >
+                      {row.original.id}
+                    </Link>
+                  ) : (
+                    flexRender(cell.column.columnDef.cell, cell.getContext())
+                  )}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }
 
