@@ -39,6 +39,32 @@ def _pyproject() -> str:
     return (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
 
+def test_requirements_lock_pins_runtime_and_dev() -> None:
+    lock = REPO_ROOT / "requirements-lock.txt"
+    assert lock.is_file()
+    text = lock.read_text(encoding="utf-8")
+    for pkg in ("fastapi==", "pytest==", "httpx=="):
+        assert pkg in text, f"{pkg} missing from lockfile"
+
+
+def test_pytest_workflow_installs_from_lockfile() -> None:
+    workflow = REPO_ROOT / ".github" / "workflows" / "test.yml"
+    assert workflow.is_file()
+    text = workflow.read_text(encoding="utf-8")
+    assert "requirements-lock.txt" in text
+    assert "pip install -r requirements-lock.txt" in text
+    assert "pip install -e . --no-deps" in text
+    assert "pytest tests/" in text
+
+
+def test_make_lock_compiles_requirements_lock() -> None:
+    recipe = _recipe("lock")
+    assert "uv pip compile" in recipe
+    assert "requirements-lock.txt" in recipe
+    assert "--extra dev" in recipe
+    assert "--python-version 3.10" in recipe
+
+
 def test_bootstrap_pip_installs_editable_dev() -> None:
     recipe = _recipe("bootstrap-pip")
     assert 'install -e "$(MAKEFILE_DIR)[dev]"' in recipe

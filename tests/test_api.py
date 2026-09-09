@@ -448,6 +448,64 @@ def test_run_events_401_before_503_when_token_set(
     assert resp.json()["error"] == "unauthorized"
 
 
+def test_policies_rejects_unknown_blast_radius(tmp_path: Path) -> None:
+    client = _client(tmp_path / "api.db")
+    body = client.get("/policies").json()
+    body["blast_radius"] = "nuke"
+
+    resp = client.put("/policies", json=body)
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+    assert "blast_radius" in resp.json()["detail"]
+
+
+def test_policies_accepts_closed_blast_radius(tmp_path: Path) -> None:
+    client = _client(tmp_path / "api.db")
+    body = client.get("/policies").json()
+    body["blast_radius"] = "intrusive"
+
+    resp = client.put("/policies", json=body)
+
+    assert resp.status_code == 200
+    assert resp.json()["blast_radius"] == "intrusive"
+
+
+def test_list_findings_caps_at_500_in_id_order(tmp_path: Path) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    from api.routes_findings import FINDINGS_LIST_CAP
+    # Insert high ids first so a missing ORDER BY would surface f0500.
+    rows = [
+        (
+            f"f{i:04d}",
+            "https://github.com/acme/app.git",
+            "deadbeefcafebabedeadbeefcafebabe",
+            "rule.x",
+            "src/a.py",
+            i,
+            "queued",
+        )
+        for i in range(FINDINGS_LIST_CAP, -1, -1)
+    ]
+    with db.session(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO findings "
+            "(id, repo_url, sha, rule_id, file, line, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+    listed = client.get("/findings")
+    assert listed.status_code == 200
+    findings = listed.json()["findings"]
+    ids = [row["id"] for row in findings]
+    assert len(ids) == FINDINGS_LIST_CAP
+    assert ids == sorted(ids)
+    assert ids[0] == "f0000"
+    assert f"f{FINDINGS_LIST_CAP:04d}" not in ids
+
+
 def test_run_events_no_longer_streams() -> None:
     import inspect
 

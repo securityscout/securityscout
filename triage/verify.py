@@ -94,7 +94,7 @@ def check_cursor_agent_smoke() -> bool:
     try:
         proc = subprocess.run(
             [binary, "--print", "--output-format", "json",
-             "--model", "composer-2.5-fast",
+             "--model", CONFIG.model_recon,
              "-p", "say hi"],
             capture_output=True, text=True, timeout=90, check=False,
             stdin=subprocess.DEVNULL,

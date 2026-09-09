@@ -192,6 +192,7 @@ CREATE INDEX IF NOT EXISTS idx_findings_rule      ON findings(rule_id);
 CREATE INDEX IF NOT EXISTS idx_findings_severity  ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_findings_repo_name ON findings(repository_name);
 CREATE INDEX IF NOT EXISTS idx_findings_scanner   ON findings(scanner_name, scanner_finding_id);
+CREATE INDEX IF NOT EXISTS idx_findings_run_id    ON findings(run_id);
 
 -- Keep updated_at fresh on any UPDATE to findings.
 CREATE TRIGGER IF NOT EXISTS findings_updated_at

@@ -51,6 +51,7 @@ help:
 	@echo "  bootstrap-brew       — brew install the toolchain (non-fatal if brew unreachable)"
 	@echo "  bootstrap-fallbacks  — report missing brew tools"
 	@echo "  bootstrap-pip        — install Python deps into .venv"
+	@echo "  lock                 — regenerate requirements-lock.txt from pyproject.toml"
 	@echo "  schema               — create SQLite schema at $(TRIAGE_DB)"
 	@echo "  verify               — bootstrap acceptance gate; exit 0 = ready to ingest"
 	@echo "  serve [HOST=h] [PORT=p] — run the control-plane API (non-loopback HOST needs TRIAGE_API_TOKEN)"
@@ -112,6 +113,11 @@ bootstrap-fallbacks:
 bootstrap-pip: bootstrap-venv
 	@echo "==> Installing Python dependencies into $(VENV_DIR)"
 	@"$(VENV_PIP)" install -e "$(MAKEFILE_DIR)[dev]"
+
+.PHONY: lock
+lock:
+	@uv pip compile pyproject.toml --extra dev --python-version 3.10 \
+	  -o requirements-lock.txt
 
 .PHONY: skill
 skill:

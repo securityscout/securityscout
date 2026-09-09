@@ -7,6 +7,7 @@ Every test injects `is_repo_accessible` (or the per-strategy `fetch` /
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -395,6 +396,37 @@ class TestClassifyAccess:
                 is_repo_accessible=_predicate_from_table({}),
             )
 
+    def test_apply_flushes_updates_in_batches(
+        self, tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            for i in range(5):
+                _insert_finding(
+                    conn, fid=f"b{i}", sf_id=str(300 + i),
+                    repo_url=f"https://gitlab.example.com/batch/repo{i}",
+                )
+        monkeypatch.setattr(ca, "CLASSIFY_UPDATE_BATCH", 2)
+        flushes: list[int] = []
+        orig = ca._apply_status_updates
+
+        def spy(conn: sqlite3.Connection, rows: list[tuple[str, str]]) -> None:
+            flushes.append(len(rows))
+            orig(conn, rows)
+
+        monkeypatch.setattr(ca, "_apply_status_updates", spy)
+        pred = _predicate_from_table({}, default=False)
+        ca.classify_access(
+            db_path=tmp_db_path, apply=True,
+            hosts=("gitlab.example.com",), is_repo_accessible=pred,
+        )
+        assert flushes == [2, 2, 1]
+        with db.session(tmp_db_path) as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM findings WHERE status='no_access'"
+            ).fetchone()[0]
+        assert n == 5
+
 
 # ---------------------------------------------------------------------------
 # Strategy builders
@@ -532,6 +564,61 @@ class TestProbeRepo:
             lambda host, path: (1, "", "glab: connection refused\n"),
         )
         assert ca._probe_repo("gitlab.example.com", "a/b") is None
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*_a: object, **_k: object) -> object:
+            raise subprocess.TimeoutExpired(cmd=["glab"], timeout=30)
+
+        monkeypatch.setattr(ca.subprocess, "run", boom)
+        rc, _out, err = ca._glab_api_raw("gitlab.example.com", "/projects/x")
+        assert rc == -1
+        assert "TimeoutExpired" in err
+        assert ca._probe_repo("gitlab.example.com", "a/b") is None
+
+    def test_oserror_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*_a: object, **_k: object) -> object:
+            raise OSError("glab not found")
+
+        monkeypatch.setattr(ca.subprocess, "run", boom)
+        rc, _out, err = ca._glab_api_raw("gitlab.example.com", "/projects/x")
+        assert rc == -1
+        assert "OSError" in err
+        assert ca._probe_repo("gitlab.example.com", "a/b") is None
+
+    def test_timeout_during_classify_keeps_earlier_flip(
+        self, tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            _insert_finding(
+                conn, fid="ok", sf_id="1",
+                repo_url="https://gitlab.example.com/first/repo",
+            )
+            _insert_finding(
+                conn, fid="late", sf_id="2",
+                repo_url="https://gitlab.example.com/second/repo",
+            )
+
+        def fake_run(cmd: list[str], **_k: object) -> subprocess.CompletedProcess[str]:
+            path = cmd[-1]
+            if "first" in path:
+                return subprocess.CompletedProcess(
+                    cmd, 1, "", "glab: 404 Project Not Found (HTTP 404)\n",
+                )
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+
+        monkeypatch.setattr(ca.subprocess, "run", fake_run)
+        ca.classify_access(
+            db_path=tmp_db_path, apply=True,
+            hosts=("gitlab.example.com",), probe=ca.PROBE_PER_REPO,
+        )
+        with db.session(tmp_db_path) as conn:
+            rows = {
+                r["id"]: r["status"]
+                for r in conn.execute("SELECT id, status FROM findings").fetchall()
+            }
+        assert rows["ok"] == "no_access"
+        assert rows["late"] == "queued"
 
     def test_url_encodes_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: list[str] = []

@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -82,6 +83,7 @@ DEFAULT_PROBE = PROBE_PER_REPO
 
 _GLAB_PAGE_SIZE = 100
 _GLAB_MAX_PAGES = 50  # 5000-repo safety bound
+CLASSIFY_UPDATE_BATCH = 500
 
 AccessPredicate = Callable[[str, str], bool | None]
 
@@ -154,13 +156,17 @@ def _glab_api_raw(
     """Run `glab api --hostname <host> <path>` and return (rc, stdout, stderr).
 
     Always closes stdin; glab inherits stdin and blocks forever otherwise.
-    Does NOT raise on non-zero exit — callers decide how to interpret it
-    (per_repo probe needs to distinguish 404 from other failures).
+    TimeoutExpired and OSError become rc=-1 so a single probe failure
+    cannot abort the classify loop. Does NOT raise on non-zero exit —
+    callers decide how to interpret it (per_repo needs 404 vs other).
     """
-    proc = subprocess.run(
-        ["glab", "api", "--hostname", host, path],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            ["glab", "api", "--hostname", host, path],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return -1, "", f"{type(exc).__name__}: {exc}"
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -270,6 +276,14 @@ def make_per_repo_predicate(
     return predicate
 
 
+def _apply_status_updates(
+    conn: sqlite3.Connection, rows: list[tuple[str, str]],
+) -> None:
+    conn.executemany(
+        "UPDATE findings SET status = ? WHERE id = ?", rows,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Core reclassification
 # ---------------------------------------------------------------------------
@@ -344,11 +358,12 @@ def classify_access(
                 to_update.append((decision, r["id"]))
                 bucket = flip_q_by_repo if decision == "queued" else flip_n_by_repo
                 bucket[repo_url] = bucket.get(repo_url, 0) + 1
+                if apply and len(to_update) >= CLASSIFY_UPDATE_BATCH:
+                    _apply_status_updates(conn, to_update)
+                    to_update.clear()
 
         if apply and to_update:
-            conn.executemany(
-                "UPDATE findings SET status = ? WHERE id = ?", to_update,
-            )
+            _apply_status_updates(conn, to_update)
 
         flipped_q = sum(flip_q_by_repo.values())
         flipped_n = sum(flip_n_by_repo.values())

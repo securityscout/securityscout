@@ -79,6 +79,18 @@ class TestParseLineOfCodeUrl:
 # normalize_row + validate_row
 # ---------------------------------------------------------------------------
 
+def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+
+
+def _read_csv(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
 def _good_csv_row(**overrides: str) -> dict[str, str]:
     base = {
         "scanner_finding_id": "818243385",
@@ -207,10 +219,7 @@ def tmp_csv(tmp_path: Path) -> Path:
         ),
     ]
     path = tmp_path / "sample.csv"
-    with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
+    _write_csv(path, rows)
     return path
 
 
@@ -287,6 +296,123 @@ class TestIngestCsv:
             ).fetchone()
         assert row["status"] == "triaging"
 
+    def test_re_ingest_exclude_leaves_triaging_row(
+        self, tmp_csv: Path, tmp_db_path: Path
+    ) -> None:
+        ingest.ingest_csv(tmp_csv, db_path=tmp_db_path, exclude_globs=())
+        with db.session(tmp_db_path) as conn:
+            conn.execute(
+                "UPDATE findings SET status='triaging' WHERE repo_url = ?",
+                ("https://gitlab.example.com/team/gateway-service",),
+            )
+        stats = ingest.ingest_csv(
+            tmp_csv, db_path=tmp_db_path, exclude_globs=("*team/gateway-service*",),
+        )
+        assert stats.rows_excluded >= 1
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute(
+                "SELECT status FROM findings WHERE repo_url = ?",
+                ("https://gitlab.example.com/team/gateway-service",),
+            ).fetchone()
+        assert row["status"] == "triaging"
+
+    def test_re_ingest_exclude_marks_queued_row(
+        self, tmp_csv: Path, tmp_db_path: Path
+    ) -> None:
+        ingest.ingest_csv(tmp_csv, db_path=tmp_db_path, exclude_globs=())
+        stats = ingest.ingest_csv(
+            tmp_csv, db_path=tmp_db_path, exclude_globs=("*team/gateway-service*",),
+        )
+        assert stats.rows_excluded >= 1
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute(
+                "SELECT status, exclusion_reason FROM findings WHERE repo_url = ?",
+                ("https://gitlab.example.com/team/gateway-service",),
+            ).fetchone()
+        assert row is not None
+        assert row["status"] == "excluded"
+        assert row["exclusion_reason"] is not None
+
+    def test_re_ingest_refreshes_scanner_url_and_branch(
+        self, tmp_csv: Path, tmp_db_path: Path
+    ) -> None:
+        ingest.ingest_csv(tmp_csv, db_path=tmp_db_path, exclude_globs=())
+        rows = _read_csv(tmp_csv)
+        rows[0]["scanner_url"] = "https://scanner.example.com/findings/refreshed"
+        rows[0]["branch"] = "refs/heads/refresh"
+        _write_csv(tmp_csv, rows)
+        stats = ingest.ingest_csv(tmp_csv, db_path=tmp_db_path, exclude_globs=())
+        assert stats.rows_updated == 1
+        assert stats.rows_unchanged == 2
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute(
+                "SELECT scanner_url, branch FROM findings "
+                "WHERE scanner_finding_id = '818243385'"
+            ).fetchone()
+        assert row["scanner_url"] == "https://scanner.example.com/findings/refreshed"
+        assert row["branch"] == "refs/heads/refresh"
+
+    def test_dry_run_of_existing_csv_counts_unchanged(
+        self, tmp_csv: Path, tmp_db_path: Path
+    ) -> None:
+        ingest.ingest_csv(tmp_csv, db_path=tmp_db_path, exclude_globs=())
+        stats = ingest.ingest_csv(
+            tmp_csv, db_path=tmp_db_path, dry_run=True, exclude_globs=(),
+        )
+        assert stats.rows_inserted == 0
+        assert stats.rows_updated == 0
+        assert stats.rows_unchanged == 3
+        with db.session(tmp_db_path) as conn:
+            n = conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0]
+            runs = conn.execute("SELECT COUNT(*) FROM ingest_runs").fetchone()[0]
+        assert n == 3
+        assert runs == 1
+
+    def test_dry_run_counts_a_refreshed_column_as_updated(
+        self, tmp_csv: Path, tmp_db_path: Path
+    ) -> None:
+        ingest.ingest_csv(tmp_csv, db_path=tmp_db_path, exclude_globs=())
+        rows = _read_csv(tmp_csv)
+        rows[0]["scanner_url"] = "https://scanner.example.com/findings/preview"
+        _write_csv(tmp_csv, rows)
+        stats = ingest.ingest_csv(
+            tmp_csv, db_path=tmp_db_path, dry_run=True, exclude_globs=(),
+        )
+        assert stats.rows_inserted == 0
+        assert stats.rows_updated == 1
+        assert stats.rows_unchanged == 2
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute(
+                "SELECT scanner_url FROM findings "
+                "WHERE scanner_finding_id = '818243385'"
+            ).fetchone()
+            runs = conn.execute("SELECT COUNT(*) FROM ingest_runs").fetchone()[0]
+        assert row["scanner_url"] == "https://scanner.example.com/findings/818243385"
+        assert runs == 1
+
+    def test_dry_run_matches_write_for_duplicate_id_in_same_csv(
+        self, tmp_path: Path, tmp_db_path: Path,
+    ) -> None:
+        """Two rows sharing a finding id (same repo/sha/file/line/rule,
+        different scanner_finding_id) must classify the same way in
+        dry-run as a real write: the second row sees the first row's
+        outcome instead of a stale pre-CSV SELECT."""
+        rows = [
+            _good_csv_row(scanner_finding_id="1"),
+            _good_csv_row(scanner_finding_id="2"),
+        ]
+        path = tmp_path / "dup.csv"
+        _write_csv(path, rows)
+
+        dry = ingest.ingest_csv(path, db_path=tmp_db_path, dry_run=True, exclude_globs=())
+        real = ingest.ingest_csv(path, db_path=tmp_db_path, exclude_globs=())
+
+        assert (dry.rows_inserted, dry.rows_updated, dry.rows_unchanged) == (
+            real.rows_inserted, real.rows_updated, real.rows_unchanged,
+        )
+        assert dry.rows_inserted == 1
+        assert dry.rows_updated == 1
+
 
 # ---------------------------------------------------------------------------
 # Schema migration
@@ -321,3 +447,4 @@ def test_schema_migration_adds_columns_to_existing_db(tmp_path: Path) -> None:
     for required in ("scanner_finding_id", "branch", "scanner_name",
                      "scanner_meta_json", "ingest_run_id", "exclusion_reason"):
         assert required in cols, f"migration did not add column: {required}"
+    assert "idx_findings_run_id" in set(db.list_tables(p))

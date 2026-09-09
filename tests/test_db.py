@@ -20,7 +20,7 @@ def test_init_schema_creates_required_tables(tmp_db: Path) -> None:
     assert tmp_db.exists()
     objects = set(db.list_tables(tmp_db))
     assert {"findings", "repo_recon", "calibration_runs"}.issubset(objects)
-    assert {"idx_findings_status", "idx_findings_repo"}.issubset(objects)
+    assert {"idx_findings_status", "idx_findings_repo", "idx_findings_run_id"}.issubset(objects)
 
 
 def test_init_schema_is_idempotent(tmp_db: Path) -> None:
@@ -29,6 +29,7 @@ def test_init_schema_is_idempotent(tmp_db: Path) -> None:
     db.init_schema(tmp_db)
     objects = set(db.list_tables(tmp_db))
     assert {"findings", "repo_recon", "calibration_runs"}.issubset(objects)
+    assert "idx_findings_run_id" in objects
     assert tmp_db.stat().st_size > 0
     assert first_mtime <= tmp_db.stat().st_mtime
 
@@ -58,10 +59,19 @@ def test_updated_at_trigger_fires(tmp_db: Path) -> None:
             "INSERT INTO findings (id, repo_url, sha, rule_id, file, line) "
             "VALUES ('t1','u','s','r','f',1)"
         )
-        before = conn.execute("SELECT updated_at FROM findings WHERE id='t1'").fetchone()["updated_at"]
+        conn.execute(
+            "UPDATE findings SET updated_at = '2000-01-01 00:00:00' WHERE id='t1'"
+        )
+        before = conn.execute(
+            "SELECT updated_at FROM findings WHERE id='t1'"
+        ).fetchone()["updated_at"]
+        assert before.startswith("2000-01-01")
         conn.execute("UPDATE findings SET status='triaging' WHERE id='t1'")
-        after = conn.execute("SELECT updated_at FROM findings WHERE id='t1'").fetchone()["updated_at"]
-    assert after >= before
+        after = conn.execute(
+            "SELECT updated_at FROM findings WHERE id='t1'"
+        ).fetchone()["updated_at"]
+    assert after != before
+    assert after > before
 
 
 def test_calibration_runs_round_trip(tmp_db: Path) -> None:
@@ -226,6 +236,7 @@ def test_init_schema_on_legacy_db_keeps_rows_and_adds_control_plane_tables(
     cols = set(db.list_columns("findings", p))
     for col in ("source_kind", "run_id", "entry_location", "sink_location"):
         assert col in cols
+    assert "idx_findings_run_id" in objects
 
 
 def test_repo_recon_primary_key_enforced(tmp_db: Path) -> None:

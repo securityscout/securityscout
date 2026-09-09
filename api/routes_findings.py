@@ -18,6 +18,8 @@ from triage.status import (
 
 router = APIRouter()
 
+FINDINGS_LIST_CAP = 500
+
 _FINDING_SELECT = (
     "f.id, f.repo_url, f.sha, f.rule_id, f.file, f.line, "
     "f.status, f.run_id, f.source_kind"
@@ -73,6 +75,8 @@ def list_findings(
     if repo is not None:
         sql += " AND (r.repo = ? OR f.repo_url LIKE ?)"
         params.extend([repo, f"%{repo}%"])
+    sql += " ORDER BY f.id LIMIT ?"
+    params.append(FINDINGS_LIST_CAP)
     with db.session(request.app.state.db_path) as conn:
         rows = conn.execute(sql, params).fetchall()
     return {"findings": [_finding(r) for r in rows]}

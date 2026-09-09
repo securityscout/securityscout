@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -12,7 +12,7 @@ router = APIRouter()
 
 class PoliciesIn(BaseModel):
     scope: dict[str, Any]
-    blast_radius: str
+    blast_radius: Literal["safe", "intrusive", "destructive"]
     budget: dict[str, Any]
     models: dict[str, Any]
     auto_publish: bool

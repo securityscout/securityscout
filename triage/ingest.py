@@ -288,7 +288,8 @@ def _is_excluded(repo_url: str, repo_name: str | None, globs: Iterable[str]) -> 
 # Columns that are written by ingest. The orchestrator's own fields
 # (status, verdict_json, verifier_json, confidence, poc_path, writeup_path,
 # attempts) are NEVER overwritten on update — re-ingest is for refreshing
-# scanner metadata only.
+# scanner metadata only. Exclude is the one status write ingest owns:
+# INSERT, and re-ingest of queued / no_access.
 _INGEST_OWNED_COLUMNS = (
     "id",
     "scanner_finding_id",
@@ -310,16 +311,17 @@ _INGEST_OWNED_COLUMNS = (
     "ingest_run_id",
 )
 
+# ingest_run_id changes every invocation; counting it as a diff would
+# make every re-ingest an UPDATE.
+_COMPARE_COLUMNS = tuple(
+    c for c in _INGEST_OWNED_COLUMNS if c not in {"id", "ingest_run_id"}
+)
+_EXCLUDE_FROM = frozenset({"queued", "no_access"})
+_EXISTING_SELECT = ", ".join((*_COMPARE_COLUMNS, "status", "exclusion_reason"))
 
-def _upsert_finding(
-    conn: sqlite3.Connection,
-    row: dict[str, object],
-    run_id: int,
-    excluded_reason: str | None,
-) -> str:
-    """Insert or refresh one row. Returns 'inserted' | 'updated' | 'unchanged'."""
-    cols = list(_INGEST_OWNED_COLUMNS)
-    values: dict[str, object] = {
+
+def _ingest_values(row: dict[str, object], run_id: int) -> dict[str, object]:
+    return {
         "id": row["id"],
         "scanner_finding_id": row["scanner_finding_id"],
         "scanner_name": row.get("scanner_name"),
@@ -340,12 +342,84 @@ def _upsert_finding(
         "ingest_run_id": run_id,
     }
 
-    existing = conn.execute(
-        "SELECT description, severity, scanner_meta_json, status FROM findings WHERE id = ?",
-        (row["id"],),
+
+def _select_existing(conn: sqlite3.Connection, finding_id: object) -> sqlite3.Row | None:
+    return conn.execute(
+        f"SELECT {_EXISTING_SELECT} FROM findings WHERE id = ?",
+        (finding_id,),
     ).fetchone()
 
+
+def _row_changed(existing: sqlite3.Row, values: dict[str, object]) -> bool:
+    return any(existing[c] != values[c] for c in _COMPARE_COLUMNS)
+
+
+def _should_mark_excluded(existing: sqlite3.Row, excluded_reason: str | None) -> bool:
+    return excluded_reason is not None and existing["status"] in _EXCLUDE_FROM
+
+
+def _exclusion_reason_changed(existing: sqlite3.Row, excluded_reason: str | None) -> bool:
+    return (
+        excluded_reason is not None
+        and existing["status"] == "excluded"
+        and existing["exclusion_reason"] != excluded_reason
+    )
+
+
+def _classify_upsert(
+    existing: sqlite3.Row | None,
+    values: dict[str, object],
+    excluded_reason: str | None,
+) -> str:
     if existing is None:
+        return "inserted"
+    if (
+        not _row_changed(existing, values)
+        and not _should_mark_excluded(existing, excluded_reason)
+        and not _exclusion_reason_changed(existing, excluded_reason)
+    ):
+        return "unchanged"
+    return "updated"
+
+
+def _simulate_write(
+    existing: sqlite3.Row | dict[str, object] | None,
+    values: dict[str, object],
+    excluded_reason: str | None,
+) -> dict[str, object]:
+    """Row state after a write `_upsert_finding` would perform for this input.
+
+    Used by dry-run to let a second row in the same CSV that shares a
+    finding id see the first row's outcome, the same way a real write's
+    SELECT would.
+    """
+    state = dict(values)
+    if existing is None:
+        state["status"] = "excluded" if excluded_reason is not None else "queued"
+        state["exclusion_reason"] = excluded_reason
+        return state
+    if _should_mark_excluded(existing, excluded_reason) or _exclusion_reason_changed(existing, excluded_reason):
+        state["status"] = "excluded"
+        state["exclusion_reason"] = excluded_reason
+    else:
+        state["status"] = existing["status"]
+        state["exclusion_reason"] = existing["exclusion_reason"]
+    return state
+
+
+def _upsert_finding(
+    conn: sqlite3.Connection,
+    row: dict[str, object],
+    run_id: int,
+    excluded_reason: str | None,
+) -> str:
+    """Insert or refresh one row. Returns 'inserted' | 'updated' | 'unchanged'."""
+    cols = list(_INGEST_OWNED_COLUMNS)
+    values = _ingest_values(row, run_id)
+    existing = _select_existing(conn, row["id"])
+    outcome = _classify_upsert(existing, values, excluded_reason)
+
+    if outcome == "inserted":
         placeholders = ",".join("?" for _ in cols)
         col_list = ",".join(cols)
         params = [values[c] for c in cols]
@@ -357,25 +431,25 @@ def _upsert_finding(
             f"INSERT INTO findings ({col_list}) VALUES ({placeholders})",
             params,
         )
-        return "inserted"
+        return outcome
 
-    # Update only the ingest-owned subset; preserve agent state.
-    changed = (
-        existing["description"] != values["description"]
-        or existing["severity"] != values["severity"]
-        or existing["scanner_meta_json"] != values["scanner_meta_json"]
-    )
-    if not changed:
-        return "unchanged"
+    if outcome == "unchanged":
+        return outcome
 
     set_clause = ",".join(f"{c}=?" for c in cols if c != "id")
     params = [values[c] for c in cols if c != "id"]
+    if existing is not None and (
+        _should_mark_excluded(existing, excluded_reason)
+        or _exclusion_reason_changed(existing, excluded_reason)
+    ):
+        set_clause += ",status=?,exclusion_reason=?"
+        params.extend(["excluded", excluded_reason])
     params.append(row["id"])
     conn.execute(
         f"UPDATE findings SET {set_clause} WHERE id = ?",
         params,
     )
-    return "updated"
+    return outcome
 
 
 def _record_run(
@@ -424,9 +498,8 @@ def ingest_csv(
 ) -> IngestStats:
     """Ingest a SAST CSV into SQLite. Idempotent.
 
-    On dry_run=True nothing is written: we still parse + validate every row
-    and return the same stats so the user can preview. The CSV's sha256 is
-    captured into ingest_runs.notes for forensic linkage.
+    On dry_run=True nothing is written. Parse, validate, and SELECT
+    existing rows so insert / update / unchanged match a real write.
     """
     csv_path = Path(csv_path).resolve()
     if not csv_path.exists():
@@ -441,6 +514,7 @@ def ingest_csv(
     seen_sha = set()
     rule_counts: dict[str, int] = {}
     excluded_globs = list(exclude_globs)
+    dry_run_state: dict[object, dict[str, object]] = {}
 
     with closing(connect(db_path)) as conn:
         if not dry_run:
@@ -490,11 +564,14 @@ def ingest_csv(
                 stats.rows_excluded += 1
 
             if dry_run:
-                # Simulate the same outcome counts so the preview is honest.
-                stats.rows_inserted += 1
-                continue
-
-            outcome = _upsert_finding(conn, row, run_id, excluded_reason)
+                values = _ingest_values(row, run_id)
+                existing = dry_run_state.get(row["id"])
+                if existing is None:
+                    existing = _select_existing(conn, row["id"])
+                outcome = _classify_upsert(existing, values, excluded_reason)
+                dry_run_state[row["id"]] = _simulate_write(existing, values, excluded_reason)
+            else:
+                outcome = _upsert_finding(conn, row, run_id, excluded_reason)
             if outcome == "inserted":
                 stats.rows_inserted += 1
             elif outcome == "updated":
@@ -530,9 +607,8 @@ def _print_stats(stats: IngestStats, *, dry_run: bool, db_path: Path) -> None:
     print(f"== {label} summary ==")
     print(f"  rows seen:       {stats.rows_seen}")
     print(f"  inserted:        {stats.rows_inserted}")
-    if not dry_run:
-        print(f"  updated:         {stats.rows_updated}")
-        print(f"  unchanged:       {stats.rows_unchanged}")
+    print(f"  updated:         {stats.rows_updated}")
+    print(f"  unchanged:       {stats.rows_unchanged}")
     print(f"  rejected:        {stats.rows_rejected}")
     print(f"  excluded (kept in DB, status=excluded): {stats.rows_excluded}")
     print(f"  unique repos:    {len(stats.by_repo)}")
