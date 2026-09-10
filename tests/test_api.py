@@ -51,11 +51,17 @@ def _seed_finding(db_path: Path, finding_id: str, status: str) -> None:
         )
 
 
-def _seed_run(db_path: Path, run_id: str, status: str = "queued") -> None:
+def _seed_run(
+    db_path: Path,
+    run_id: str,
+    status: str = "queued",
+    policy_json: str = "{}",
+) -> None:
     with db.session(db_path) as conn:
         conn.execute(
             "INSERT INTO engagements (id, name, org, policy_json, created_at) "
-            "VALUES ('e1', 'acme-web', 'acme', '{}', '2026-09-08T00:00:00+00:00')"
+            "VALUES ('e1', 'acme-web', 'acme', ?, '2026-09-08T00:00:00+00:00')",
+            (policy_json,),
         )
         conn.execute(
             """
@@ -504,6 +510,146 @@ def test_list_findings_caps_at_500_in_id_order(tmp_path: Path) -> None:
     assert ids == sorted(ids)
     assert ids[0] == "f0000"
     assert f"f{FINDINGS_LIST_CAP:04d}" not in ids
+
+
+def _seed_spans(db_path: Path, rows: list[tuple[str, str, str, str, str, str, str]]) -> None:
+    with db.session(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO tool_spans "
+            "(id, run_id, agent, tool, args_hash, result_sha256, t) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+
+def test_get_run_returns_spans_oldest_first(tmp_path: Path) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_run(db_path, "r1", "running")
+    _seed_spans(
+        db_path,
+        [
+            ("s2", "r1", "hunter", "http", "a2", "r2", "2026-09-08T00:00:02+00:00"),
+            ("s1", "r1", "recon", "read", "a1", "r1", "2026-09-08T00:00:01+00:00"),
+        ],
+    )
+
+    body = client.get("/runs/r1").json()
+
+    assert [s["id"] for s in body["spans"]] == ["s1", "s2"]
+    assert body["spans"][0] == {
+        "id": "s1",
+        "agent": "recon",
+        "tool": "read",
+        "args_hash": "a1",
+        "result_sha256": "r1",
+        "t": "2026-09-08T00:00:01+00:00",
+    }
+
+
+def test_get_run_spans_cap_keeps_the_newest(tmp_path: Path) -> None:
+    from api.routes_runs import RUN_SPANS_CAP
+
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_run(db_path, "r1", "running")
+    _seed_spans(
+        db_path,
+        [
+            (
+                f"s{i:04d}",
+                "r1",
+                "recon",
+                "read",
+                "a",
+                "r",
+                f"2026-09-08T00:00:00.{i:04d}+00:00",
+            )
+            for i in range(RUN_SPANS_CAP + 1)
+        ],
+    )
+
+    spans = client.get("/runs/r1").json()["spans"]
+    ids = [s["id"] for s in spans]
+
+    assert len(ids) == RUN_SPANS_CAP
+    assert ids == sorted(ids)
+    assert ids[0] == "s0001"
+    assert "s0000" not in ids
+
+
+def test_a_span_without_a_timestamp_reads_as_the_oldest(tmp_path: Path) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_run(db_path, "r1", "running")
+    with db.session(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO tool_spans "
+            "(id, run_id, agent, tool, args_hash, result_sha256, t) "
+            "VALUES (?, 'r1', 'recon', 'read', 'a', 'r', ?)",
+            [("s1", "2026-09-08T00:00:01+00:00"), ("s0", None)],
+        )
+
+    spans = client.get("/runs/r1").json()["spans"]
+
+    assert [s["id"] for s in spans] == ["s0", "s1"]
+    assert spans[0]["t"] is None
+
+
+def test_run_spans_are_scoped_and_absent_from_the_run_list(tmp_path: Path) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_run(db_path, "r1", "running")
+    with db.session(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO runs (
+              id, engagement_id, mode, playbook, repo, sha, status, budget_spent_usd
+            ) VALUES ('r2', 'e1', 'triage', 'web-app.v1', 'acme/app', 'deadbeef', 'queued', 0)
+            """
+        )
+    _seed_spans(
+        db_path,
+        [
+            ("s1", "r1", "recon", "read", "a1", "h1", "2026-09-08T00:00:01+00:00"),
+            ("s2", "r2", "recon", "read", "a2", "h2", "2026-09-08T00:00:02+00:00"),
+        ],
+    )
+
+    assert [s["id"] for s in client.get("/runs/r1").json()["spans"]] == ["s1"]
+
+    listed = client.get("/engagements/e1/runs").json()["runs"]
+    assert len(listed) == 2
+    for run in listed:
+        assert "spans" not in run
+        assert "budget_limit_usd" not in run
+
+
+@pytest.mark.parametrize(
+    ("policy_json", "expected"),
+    [
+        ('{"budget_usd": 12.5}', 12.5),
+        ("{}", None),
+        ('{"budget_usd": "lots"}', None),
+        ('{"budget_usd": null}', None),
+        ('{"budget_usd": true}', None),
+        ('{"budget_usd": 0}', None),
+        ('{"budget_usd": -5}', None),
+        ("[]", None),
+        ("not json", None),
+    ],
+)
+def test_run_budget_limit_comes_from_the_engagement_policy(
+    tmp_path: Path, policy_json: str, expected: float | None
+) -> None:
+    db_path = tmp_path / "api.db"
+    client = _client(db_path)
+    _seed_run(db_path, "r1", "running", policy_json=policy_json)
+
+    body = client.get("/runs/r1").json()
+
+    assert body["budget_limit_usd"] == expected
+    assert body["budget_spent_usd"] == 0
 
 
 def test_run_events_no_longer_streams() -> None:

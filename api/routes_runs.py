@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -14,6 +15,8 @@ from api.routes_engagements import get_engagement
 from triage import db
 
 router = APIRouter()
+
+RUN_SPANS_CAP = 200
 
 
 class RunIn(BaseModel):
@@ -38,6 +41,42 @@ def _run(row: Any) -> dict[str, Any]:
         "started_at": row["started_at"],
         "ended_at": row["ended_at"],
     }
+
+
+def _spans(conn: Any, run_id: str) -> list[dict[str, Any]]:
+    """The newest RUN_SPANS_CAP spans of one run, returned oldest-first.
+
+    A span with a null `t` sorts last under DESC, so an over-cap run drops it
+    first and the console reads it as the oldest row.
+    """
+    rows = conn.execute(
+        "SELECT id, agent, tool, args_hash, result_sha256, t FROM tool_spans "
+        "WHERE run_id = ? ORDER BY t DESC, id DESC LIMIT ?",
+        (run_id, RUN_SPANS_CAP),
+    ).fetchall()
+    return [dict(row) for row in reversed(rows)]
+
+
+def _budget_limit_usd(conn: Any, engagement_id: str) -> float | None:
+    """The engagement's `budget_usd` ceiling, or None when there isn't one.
+
+    Anything that is not a positive number — malformed `policy_json`, a
+    non-object policy, a bool, a string, zero — reads as no ceiling, so the
+    meter goes indeterminate instead of showing a guessed one.
+    """
+    row = conn.execute(
+        "SELECT policy_json FROM engagements WHERE id = ?", (engagement_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        policy = json.loads(row["policy_json"])
+    except ValueError:
+        return None
+    limit = policy.get("budget_usd") if isinstance(policy, dict) else None
+    if isinstance(limit, bool) or not isinstance(limit, (int, float)):
+        return None
+    return float(limit) if limit > 0 else None
 
 
 def _get_run(conn: Any, run_id: str) -> Any:
@@ -84,8 +123,19 @@ def create_run(engagement_id: str, body: RunIn, request: Request) -> dict[str, A
 
 @router.get("/runs/{run_id}")
 def get_run(run_id: str, request: Request) -> dict[str, Any]:
+    """One payload for the whole console.
+
+    The evidence timeline rides the poll `GET /runs/{id}` already carries; a
+    second query on that route would double the request the UI makes each
+    second.
+    """
     with db.session(request.app.state.db_path) as conn:
-        return _run(_get_run(conn, run_id))
+        row = _get_run(conn, run_id)
+        return {
+            **_run(row),
+            "budget_limit_usd": _budget_limit_usd(conn, row["engagement_id"]),
+            "spans": _spans(conn, run_id),
+        }
 
 
 @router.post("/runs/{run_id}/cancel")
