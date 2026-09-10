@@ -15,14 +15,17 @@ user policy decision (set by ingest globs) and outranks live access.
 Two probe strategies live behind a single `is_repo_accessible(host, path)`
 predicate interface:
 
-* ``per_repo`` (default) — one `glab api /projects/<encoded_path>` per
-  unique repo. 200 = accessible, 404/403 = no_access. Catches access
-  paths the membership probe misses: group-inherited access, namespace
-  renames that redirect, ad-hoc shares.
+* ``per_repo`` (default) — one API call per unique repo:
+  `glab api /projects/<encoded_path>` for most hosts, `gh api
+  repos/<owner>/<name>` for github.com / www.github.com. 200 = accessible,
+  404/403 = no_access. Catches access paths the membership probe misses:
+  group-inherited access, namespace renames that redirect, ad-hoc shares.
 
 * ``membership`` — one paginated `/projects?membership=true` per host,
   then set lookup against `path_with_namespace`. Cheap but only sees
-  *direct* membership; misses inheritance and redirects.
+  *direct* membership; misses inheritance and redirects. glab-only:
+  there is no membership-list probe for github.com, so those rows are
+  left alone under this strategy.
 
 Hosts NOT listed in TRIAGE_ACCESS_HOSTS have no auth surface wired up,
 so they cannot be probed at all and their rows are left alone.
@@ -65,12 +68,15 @@ from triage.config import CONFIG
 from triage.db import connect, init_schema
 
 
-# Hosts for which we know how to consult a live access API. Empty by
-# default: `glab` is the only probe implemented, and listing a host it
-# cannot answer for would classify that host's repos on a probe that
-# never runs. Set TRIAGE_ACCESS_HOSTS once the matching auth surface
-# exists.
-DEFAULT_ACCESS_HOSTS: tuple[str, ...] = ()
+# Hosts for which we know how to consult a live access API. A host earns
+# a spot here only once its probe exists — listing one that cannot be
+# answered would classify that host's repos on a probe that never runs.
+# github.com dispatches to `gh`; every other host still needs
+# TRIAGE_ACCESS_HOSTS set explicitly.
+DEFAULT_ACCESS_HOSTS: tuple[str, ...] = ("github.com",)
+
+# Hosts routed to the `gh` probe instead of `glab`.
+GITHUB_HOSTS: frozenset[str] = frozenset({"github.com", "www.github.com"})
 
 # Only rows in these statuses are reclassifiable. Everything else is sticky
 # (a user/orchestrator decision classify_access must not override).
@@ -170,8 +176,53 @@ def _glab_api_raw(
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def _gh_api_raw(path: str, *, timeout: float = 30.0) -> tuple[int, str, str]:
+    """Run `gh api <path>` and return (rc, stdout, stderr).
+
+    Mirrors `_glab_api_raw`: closes stdin, and TimeoutExpired/OSError
+    become rc=-1 so a single probe failure cannot abort the classify loop.
+    """
+    try:
+        proc = subprocess.run(
+            ["gh", "api", path],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return -1, "", f"{type(exc).__name__}: {exc}"
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _probe_github_repo(host: str, path: str) -> bool | None:
+    """Single-repo access probe via `gh api repos/<owner>/<name>`.
+
+    `path` is `owner/name`. Returns True (rc==0), False (404/403), or
+    None (anything else, including a subprocess failure).
+    """
+    rc, out, err = _gh_api_raw(f"repos/{path}")
+    if rc == 0:
+        return True
+    blob = f"{err} {out}".lower()
+    if "(http 404)" in blob or "(http 403)" in blob:
+        return False
+    return None
+
+
+def _probe_host_access(host: str, path: str) -> bool | None:
+    """Dispatch to the `gh` probe for github.com, `glab` for everything else."""
+    if host in GITHUB_HOSTS:
+        return _probe_github_repo(host, path)
+    return _probe_repo(host, path)
+
+
 def _fetch_member_paths(host: str) -> set[str]:
-    """Return the user's direct-membership project paths on `host`, lowercased."""
+    """Return the user's direct-membership project paths on `host`, lowercased.
+
+    github.com has no membership-list probe; return empty without
+    spawning anything so `make_membership_predicate` can special-case it
+    rather than reading an empty set as "no access anywhere".
+    """
+    if host in GITHUB_HOSTS:
+        return set()
     paths: set[str] = set()
     for page in range(1, _GLAB_MAX_PAGES + 1):
         rc, out, err = _glab_api_raw(
@@ -235,12 +286,24 @@ def make_membership_predicate(
     hosts_set = {h.lower() for h in hosts}
     cache: dict[str, set[str]] = {h: fetch_member_paths(h) for h in hosts_set}
     if stats is not None:
-        stats.member_counts = {h: len(v) for h, v in cache.items()}
+        # github.com's cache entry is always an uncalled-for empty set (no
+        # membership-list probe exists); reporting it would read as "checked,
+        # zero projects" instead of "never checked".
+        stats.member_counts = {
+            h: len(v) for h, v in cache.items() if h not in GITHUB_HOSTS
+        }
 
     def predicate(host: str, path: str) -> bool | None:
         if host not in hosts_set:
             if stats is not None:
                 stats.unknown_host_repos[host] = stats.unknown_host_repos.get(host, 0) + 1
+            return None
+        if host in GITHUB_HOSTS:
+            # No membership-list probe for github.com. An empty cache set
+            # would read as "not a member anywhere" (False, no_access) —
+            # wrong. Leave the row alone instead, same as a probe error.
+            if stats is not None:
+                stats.probe_errors[host] = stats.probe_errors.get(host, 0) + 1
             return None
         return path in cache[host]
 
@@ -250,7 +313,7 @@ def make_membership_predicate(
 def make_per_repo_predicate(
     hosts: tuple[str, ...],
     *,
-    probe: Callable[[str, str], bool | None] = _probe_repo,
+    probe: Callable[[str, str], bool | None] = _probe_host_access,
     stats: ClassifyStats | None = None,
 ) -> AccessPredicate:
     """Predicate backed by one `glab api /projects/<path>` per unique repo.
