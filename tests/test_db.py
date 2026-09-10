@@ -239,6 +239,55 @@ def test_init_schema_on_legacy_db_keeps_rows_and_adds_control_plane_tables(
     assert "idx_findings_run_id" in objects
 
 
+def test_init_schema_adds_runs_scope_columns_and_keeps_row(tmp_path: Path) -> None:
+    """Pre-gateway `runs` rows keep their data and gain scope/blast_radius."""
+    p = tmp_path / "legacy-runs.db"
+    conn = sqlite3.connect(p)
+    conn.executescript(
+        """
+        CREATE TABLE engagements (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          org TEXT NOT NULL,
+          policy_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO engagements (id, name, org, created_at)
+        VALUES ('e1', 'Acme', 'acme', '2026-01-01T00:00:00Z');
+
+        CREATE TABLE runs (
+          id TEXT PRIMARY KEY,
+          engagement_id TEXT NOT NULL REFERENCES engagements(id),
+          mode TEXT NOT NULL,
+          playbook TEXT NOT NULL,
+          repo TEXT NOT NULL,
+          sha TEXT NOT NULL,
+          target_url TEXT,
+          status TEXT NOT NULL,
+          budget_spent_usd REAL NOT NULL DEFAULT 0,
+          started_at TEXT,
+          ended_at TEXT
+        );
+        INSERT INTO runs (id, engagement_id, mode, playbook, repo, sha, status)
+        VALUES ('r1', 'e1', 'triage', 'web-app.v1', 'acme/app', 'deadbeef', 'queued');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db.init_schema(p)
+    cols = set(db.list_columns("runs", p))
+    assert "scope_json" in cols
+    assert "blast_radius" in cols
+    with db.session(p) as conn:
+        row = conn.execute("SELECT * FROM runs WHERE id='r1'").fetchone()
+    assert row["repo"] == "acme/app"
+    assert row["sha"] == "deadbeef"
+    assert row["status"] == "queued"
+    assert row["scope_json"] == "{}"
+    assert row["blast_radius"] == "safe"
+
+
 def test_repo_recon_primary_key_enforced(tmp_db: Path) -> None:
     db.init_schema(tmp_db)
     with db.session(tmp_db) as conn:
