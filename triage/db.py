@@ -117,7 +117,9 @@ CREATE TABLE IF NOT EXISTS runs (
   status             TEXT NOT NULL,              -- queued | running | cancelled | done | error
   budget_spent_usd   REAL NOT NULL DEFAULT 0,
   started_at         TEXT,
-  ended_at           TEXT
+  ended_at           TEXT,
+  scope_json         TEXT NOT NULL DEFAULT '{}', -- {"repos":[...],"hosts":[...]}; empty hosts denies all
+  blast_radius       TEXT NOT NULL DEFAULT 'safe' -- safe | intrusive | destructive
 );
 
 CREATE TABLE IF NOT EXISTS assets (
@@ -213,6 +215,12 @@ _FINDINGS_RENAME_COLUMNS: list[tuple[str, str]] = [
     ("semgrep_meta_json", "scanner_meta_json"),
 ]
 
+# Columns added to `runs` after the original CREATE TABLE.
+_RUNS_ADDED_COLUMNS: list[tuple[str, str]] = [
+    ("scope_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("blast_radius", "TEXT NOT NULL DEFAULT 'safe'"),
+]
+
 # Columns added to `findings` after the original CREATE TABLE.
 # `_migrate_findings_columns` adds any missing one without dropping data.
 _FINDINGS_ADDED_COLUMNS: list[tuple[str, str]] = [
@@ -274,6 +282,7 @@ def init_schema(db_path: Path | str | None = None) -> Path:
         conn.executescript(_TABLES_SQL)
         _migrate_findings_renames(conn)
         _migrate_findings_columns(conn)
+        _migrate_runs_columns(conn)
         _drop_removed_tables(conn)
         conn.executescript(_INDEXES_SQL)
     return path
@@ -303,6 +312,17 @@ def _migrate_findings_columns(conn: sqlite3.Connection) -> list[str]:
     for col_name, col_def in _FINDINGS_ADDED_COLUMNS:
         if col_name not in existing:
             conn.execute(f"ALTER TABLE findings ADD COLUMN {col_name} {col_def}")
+            added.append(col_name)
+    return added
+
+
+def _migrate_runs_columns(conn: sqlite3.Connection) -> list[str]:
+    """Add any column listed in `_RUNS_ADDED_COLUMNS` that doesn't already exist."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    added: list[str] = []
+    for col_name, col_def in _RUNS_ADDED_COLUMNS:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {col_name} {col_def}")
             added.append(col_name)
     return added
 
