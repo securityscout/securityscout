@@ -1,4 +1,4 @@
 FROM debian:bookworm-slim
 
-# Slim base for the tool sandbox. Hunt-specialist CLIs (P7) land here as
-# they're needed; this slice ships an empty, buildable image only.
+# Deliberately empty. Hunt-specialist CLIs are installed here when the
+# specialists that need them land. Never built in CI.

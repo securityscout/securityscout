@@ -239,6 +239,24 @@ def test_init_schema_on_legacy_db_keeps_rows_and_adds_control_plane_tables(
     assert "idx_findings_run_id" in objects
 
 
+def test_fresh_runs_defaults_deny_all_hosts_and_safe_tier(tmp_db: Path) -> None:
+    """The CREATE defaults must match `_RUNS_ADDED_COLUMNS`; both are the
+    fail-closed values the gateway relies on."""
+    db.init_schema(tmp_db)
+    with db.session(tmp_db) as conn:
+        conn.execute(
+            "INSERT INTO engagements (id, name, org, created_at) "
+            "VALUES ('e1', 'Acme', 'acme', '2026-01-01T00:00:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO runs (id, engagement_id, mode, playbook, repo, sha, status) "
+            "VALUES ('r1', 'e1', 'triage', 'web-app.v1', 'acme/app', 'deadbeef', 'queued')"
+        )
+        row = conn.execute("SELECT * FROM runs WHERE id='r1'").fetchone()
+    assert row["scope_json"] == "{}"
+    assert row["blast_radius"] == "safe"
+
+
 def test_init_schema_adds_runs_scope_columns_and_keeps_row(tmp_path: Path) -> None:
     """Pre-gateway `runs` rows keep their data and gain scope/blast_radius."""
     p = tmp_path / "legacy-runs.db"

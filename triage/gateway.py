@@ -1,8 +1,11 @@
 """Tool gateway: scope + blast-radius enforcement, hashed evidence, kill.
 
 `scope` and `blast_radius` are immutable run inputs read from the `runs`
-row; a caller cannot override them through `invoke` kwargs. An empty
-`scope.hosts` list is fail-closed — every host is denied.
+row; a caller cannot override them through `invoke` kwargs.
+
+Both checks fail closed on bad data rather than degrading to permissive:
+an empty or malformed `scope.hosts` denies every host, and a tier outside
+`BLAST_RADIUS` restricts as `safe`.
 """
 
 from __future__ import annotations
@@ -20,6 +23,26 @@ from triage import db
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 BLAST_RADIUS = ("safe", "intrusive", "destructive")
+
+
+def _scope_hosts(scope_json: str | None) -> set[str]:
+    """Lowercased hostnames in scope.
+
+    Every malformed shape — unparseable JSON, a non-object, a null or
+    non-list `hosts` — yields the empty set, which denies every host. A
+    scope this broken cannot be honoured, and guessing wider than the
+    operator wrote is the one failure mode worth ruling out.
+    """
+    try:
+        scope = json.loads(scope_json or "{}")
+    except ValueError:
+        return set()
+    if not isinstance(scope, dict):
+        return set()
+    hosts = scope.get("hosts")
+    if not isinstance(hosts, (list, tuple)):
+        return set()
+    return {str(h).lower() for h in hosts}
 
 
 class OutOfScopeError(Exception):
@@ -67,18 +90,21 @@ def invoke(
     if row is None:
         raise LookupError(run_id)
 
-    scope = json.loads(row["scope_json"] or "{}")
-    hosts = {h.lower() for h in scope.get("hosts", [])}
-    method = str(args.get("method", "GET")).upper()
-    url = str(args.get("url", ""))
-    host = (urlparse(url).hostname or "").lower()
+    if not args.get("method"):
+        raise ValueError("args['method'] is required")
+    method = str(args["method"]).upper()
+    host = (urlparse(str(args.get("url", ""))).hostname or "").lower()
 
-    if host not in hosts:
+    if host not in _scope_hosts(row["scope_json"]):
         raise OutOfScopeError(host=host)
 
-    blast_radius = row["blast_radius"]
-    if blast_radius == "safe" and method not in SAFE_METHODS:
-        raise BlastRadiusError(method=method, blast_radius=blast_radius)
+    # Membership, not equality against 'safe': an unrecognized or miscased
+    # tier restricts as `safe`. A control that disables itself on a
+    # malformed row is worse than one that over-refuses a legitimate call.
+    raw_tier = row["blast_radius"]
+    tier = raw_tier if raw_tier in BLAST_RADIUS else "safe"
+    if tier == "safe" and method not in SAFE_METHODS:
+        raise BlastRadiusError(method=method, blast_radius=raw_tier)
 
     call_id = uuid.uuid4().hex
     event = threading.Event()
