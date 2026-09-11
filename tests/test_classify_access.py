@@ -633,15 +633,180 @@ class TestProbeRepo:
 
 
 # ---------------------------------------------------------------------------
+# _gh_api_raw / _probe_github_repo — output-parsing contract, mirrors glab
+# ---------------------------------------------------------------------------
+
+class TestGhApiRaw:
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*_a: object, **_k: object) -> object:
+            raise subprocess.TimeoutExpired(cmd=["gh"], timeout=30)
+
+        monkeypatch.setattr(ca.subprocess, "run", boom)
+        rc, _out, err = ca._gh_api_raw("repos/acme/app")
+        assert rc == -1
+        assert "TimeoutExpired" in err
+
+    def test_oserror_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*_a: object, **_k: object) -> object:
+            raise OSError("gh not found")
+
+        monkeypatch.setattr(ca.subprocess, "run", boom)
+        rc, _out, err = ca._gh_api_raw("repos/acme/app")
+        assert rc == -1
+        assert "OSError" in err
+
+
+class TestProbeGithubRepo:
+    def test_rc0_is_accessible(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            ca, "_gh_api_raw", lambda path, **_k: (0, '{"id":1}', ""),
+        )
+        assert ca._probe_github_repo("github.com", "acme/app") is True
+
+    def test_http_404_is_inaccessible(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            ca, "_gh_api_raw",
+            lambda path, **_k: (1, "", "gh: Not Found (HTTP 404)\n"),
+        )
+        assert ca._probe_github_repo("github.com", "ghost/repo") is False
+
+    def test_http_403_is_inaccessible(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            ca, "_gh_api_raw",
+            lambda path, **_k: (1, "", "gh: forbidden (HTTP 403)\n"),
+        )
+        assert ca._probe_github_repo("github.com", "private/repo") is False
+
+    def test_other_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            ca, "_gh_api_raw",
+            lambda path, **_k: (1, "", "gh: connection refused\n"),
+        )
+        assert ca._probe_github_repo("github.com", "a/b") is None
+
+    def test_rc_negative_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ca, "_gh_api_raw", lambda path, **_k: (-1, "", "boom"))
+        assert ca._probe_github_repo("github.com", "a/b") is None
+
+
+class TestProbeHostAccess:
+    def test_github_dispatches_to_gh(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ca, "_probe_github_repo", lambda h, p: True)
+        monkeypatch.setattr(
+            ca, "_probe_repo",
+            lambda h, p: (_ for _ in ()).throw(AssertionError("glab must not be called")),
+        )
+        assert ca._probe_host_access("github.com", "acme/app") is True
+        assert ca._probe_host_access("www.github.com", "acme/app") is True
+
+    def test_other_host_dispatches_to_glab(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            ca, "_probe_github_repo",
+            lambda h, p: (_ for _ in ()).throw(AssertionError("gh must not be called")),
+        )
+        monkeypatch.setattr(ca, "_probe_repo", lambda h, p: False)
+        assert ca._probe_host_access("gitlab.example.com", "acme/app") is False
+
+
+class TestGithubClassify:
+    def test_github_host_uses_injected_gh_not_glab(
+        self, tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("TRIAGE_ACCESS_HOSTS", raising=False)
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            _insert_finding(conn, fid="g1", sf_id="30", status="no_access",
+                            repo_url="https://github.com/acme/app")
+
+        monkeypatch.setattr(ca, "_gh_api_raw", lambda path, **_k: (0, '{"id":1}', ""))
+
+        def glab_must_not_run(*_a: object, **_k: object) -> object:
+            raise AssertionError("glab must not be called for github.com")
+
+        monkeypatch.setattr(ca, "_glab_api_raw", glab_must_not_run)
+
+        ca.classify_access(db_path=tmp_db_path, apply=True)
+
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute("SELECT status FROM findings WHERE id = 'g1'").fetchone()
+        assert row["status"] == "queued"
+
+    def test_github_404_is_explicit_false(
+        self, tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("TRIAGE_ACCESS_HOSTS", raising=False)
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            _insert_finding(conn, fid="g2", sf_id="31",
+                            repo_url="https://github.com/acme/gone")
+
+        monkeypatch.setattr(
+            ca, "_gh_api_raw",
+            lambda path, **_k: (1, "", "gh: Not Found (HTTP 404)\n"),
+        )
+
+        ca.classify_access(db_path=tmp_db_path, apply=True)
+
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute("SELECT status FROM findings WHERE id = 'g2'").fetchone()
+        assert row["status"] == "no_access"
+
+    def test_github_probe_error_leaves_row(
+        self, tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("TRIAGE_ACCESS_HOSTS", raising=False)
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            _insert_finding(conn, fid="g3", sf_id="32",
+                            repo_url="https://github.com/acme/flaky")
+
+        monkeypatch.setattr(
+            ca, "_gh_api_raw", lambda path, **_k: (1, "", "gh: connection refused\n"),
+        )
+
+        stats = ca.classify_access(db_path=tmp_db_path, apply=True)
+
+        assert stats.probe_errors == {"github.com": 1}
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute("SELECT status FROM findings WHERE id = 'g3'").fetchone()
+        assert row["status"] == "queued"
+
+    def test_membership_probe_leaves_github_rows_alone(
+        self, tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("TRIAGE_ACCESS_HOSTS", raising=False)
+        db.init_schema(tmp_db_path)
+        with db.session(tmp_db_path) as conn:
+            _insert_finding(conn, fid="g4", sf_id="33",
+                            repo_url="https://github.com/acme/app")
+
+        def glab_must_not_run(*_a: object, **_k: object) -> object:
+            raise AssertionError("glab must not be called for github.com")
+
+        monkeypatch.setattr(ca, "_glab_api_raw", glab_must_not_run)
+
+        stats = ca.classify_access(
+            db_path=tmp_db_path, apply=True, probe=ca.PROBE_MEMBERSHIP,
+        )
+
+        assert stats.probe_errors == {"github.com": 1}
+        # Never actually probed for membership — must not report a fake count.
+        assert stats.member_counts == {}
+        with db.session(tmp_db_path) as conn:
+            row = conn.execute("SELECT status FROM findings WHERE id = 'g4'").fetchone()
+        assert row["status"] == "queued"
+
+
+# ---------------------------------------------------------------------------
 # Env handling
 # ---------------------------------------------------------------------------
 
 class TestHostsToCheck:
-    def test_default_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Shipping a host with no working probe marks its rows no_access.
+    def test_default_includes_github(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # github.com has a working probe (_probe_github_repo via gh) now.
         monkeypatch.delenv("TRIAGE_ACCESS_HOSTS", raising=False)
-        assert ca.DEFAULT_ACCESS_HOSTS == ()
-        assert ca.hosts_to_check() == ()
+        assert ca.DEFAULT_ACCESS_HOSTS == ("github.com",)
+        assert ca.hosts_to_check() == ("github.com",)
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TRIAGE_ACCESS_HOSTS", "gitlab.example.com, github.com ")
