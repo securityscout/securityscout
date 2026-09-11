@@ -1,0 +1,15 @@
+{
+  "request": {
+    "method": "GET",
+    "url": "https://photoview.fixture.invalid/api/search?q=sunset"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "server": "werkzeug/3.0.1 python/3.11.8"
+    },
+    "body_excerpt": "{\"query\": \"SELECT id, path FROM media WHERE title LIKE '%sunset%'\", \"results\": [{\"id\": 4, \"path\": \"/media/sunset-01.jpg\"}]}"
+  },
+  "timing_ms": 41
+}

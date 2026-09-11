@@ -1,0 +1,21 @@
+# Hunt playbook for a web application target.
+#
+# Stage ids and order are a contract: triage.hunt.load_playbook rejects a
+# file that renames, reorders or drops one. `cap` is the hard step cap for
+# that stage — an uncapped recon loops forever instead of failing.
+id: web-app
+version: 1
+classes: [injection, xss, auth, authz, ssrf]
+stages:
+  # languages, routes, sinks, auth gates, dependency CVEs
+  - {id: recon, cap: 1}
+  # same service / same CWE / same package hints, attached as hypotheses only
+  - {id: knowledge, cap: 1}
+  # one agent per class, in parallel
+  - {id: spawn_specialists, cap: 5}
+  # prove attempts per hypothesis; exhausted means indeterminate, not retry
+  - {id: prove, cap: 3}
+  - {id: verify, cap: 1}
+  - {id: graph, cap: 1}
+  - {id: critic, cap: 1}
+  - {id: report, cap: 1}
