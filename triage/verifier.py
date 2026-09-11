@@ -1,8 +1,12 @@
-"""Harness replay. Owns proof.replay.passed and done → needs_review."""
+"""Replay a proof (harness subprocess or transcript hash-check).
+
+Owns proof.replay.passed and done → needs_review.
+"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shlex
 import subprocess
@@ -88,6 +92,42 @@ def _run_harness(command: str, worktree: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _verify_transcript_artifact(proof: dict, *, run_id: str | None, db_path: Path | str) -> tuple[bool, dict]:
+    """Hash-check a self-contained http_replay/browser_trace transcript.
+
+    Per the evidence contract these kinds are never re-hit live; the
+    verifier only confirms the artifact on disk still matches the hash
+    the hunter recorded. `artifact_uri` is hunter-authored — the same
+    trust boundary the EnIGMA soliloquize guard already applies to cited
+    tool output — so it can name any path this process can read. The
+    declared `artifact_sha256` must already be a `tool_spans.result_sha256`
+    this run's own gateway-mediated capture produced *before* the file is
+    opened at all; that turns "point artifact_uri at an arbitrary file
+    and read back its hash" into a no-op unless the hash was already
+    legitimately produced by this run.
+    """
+    artifact_uri = proof.get("artifact_uri")
+    expected_hash = proof.get("artifact_sha256")
+    if not artifact_uri or not expected_hash:
+        return False, {"error": "proof missing artifact_uri or artifact_sha256"}
+    if not run_id:
+        return False, {"error": "finding has no run_id; cannot verify artifact provenance"}
+    with session(db_path) as conn:
+        spanned = conn.execute(
+            "SELECT 1 FROM tool_spans WHERE run_id = ? AND result_sha256 = ?",
+            (run_id, expected_hash),
+        ).fetchone()
+    if spanned is None:
+        return False, {"error": "artifact_sha256 not recorded in tool_spans for this run"}
+    path = Path(artifact_uri)
+    if not path.is_file():
+        return False, {"error": f"artifact not found: {artifact_uri}"}
+    actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        return False, {"error": "artifact_sha256 mismatch", "artifact_sha256_actual": actual_hash}
+    return True, {"artifact_sha256_actual": actual_hash}
+
+
 def _sanitizer_ok(worktree: Path, sanitizers: list) -> tuple[bool, list[str]]:
     misses: list[str] = []
     for item in sanitizers:
@@ -118,13 +158,20 @@ def verify_finding(
         if row["status"] != "verifying":
             raise ValueError(f"finding {finding_id} is {row['status']}, want verifying")
         envelope = _load_envelope(row["verdict_json"])
-        tree = worktree_for(row, Path(worktree) if worktree is not None else None)
 
     consolidated = alias_poc_to_proof(envelope["consolidated"])
     errors = [e.message for e in _validator().iter_errors(consolidated)]
     replay_meta: dict = {"command": None, "expected_exit": None, "actual_exit": None, "passed": False}
     sanitizer_ok = True
     sanitizer_misses: list[str] = []
+
+    tree: Path | None = None
+
+    def resolve_tree() -> Path:
+        nonlocal tree
+        if tree is None:
+            tree = worktree_for(row, Path(worktree) if worktree is not None else None)
+        return tree
 
     if errors:
         result = {
@@ -156,24 +203,30 @@ def verify_finding(
     replay_meta["expected_exit"] = expected
     replay_meta["kind"] = kind
     passed = False
-    if kind != "harness":
-        replay_meta["error"] = "proof.kind is not harness"
-    elif command and expected is not None:
-        try:
-            proc = _run_harness(str(command), tree)
-            replay_meta["actual_exit"] = proc.returncode
-            passed = proc.returncode == int(expected)
-        except subprocess.TimeoutExpired:
-            replay_meta["actual_exit"] = None
-            replay_meta["timeout"] = True
-            passed = False
-        except (ValueError, OSError) as e:
-            replay_meta["error"] = str(e)
-            passed = False
+    if kind == "harness":
+        if command and expected is not None:
+            try:
+                proc = _run_harness(str(command), resolve_tree())
+                replay_meta["actual_exit"] = proc.returncode
+                passed = proc.returncode == int(expected)
+            except subprocess.TimeoutExpired:
+                replay_meta["actual_exit"] = None
+                replay_meta["timeout"] = True
+                passed = False
+            except (ValueError, OSError) as e:
+                replay_meta["error"] = str(e)
+                passed = False
+    elif kind in ("http_replay", "browser_trace"):
+        passed, artifact_meta = _verify_transcript_artifact(
+            proof, run_id=row["run_id"], db_path=db_path
+        )
+        replay_meta.update(artifact_meta)
+    else:
+        replay_meta["error"] = "proof.kind is not a supported replay kind"
 
     sanitizers = consolidated.get("sanitizers_in_path") or []
     if isinstance(sanitizers, list) and sanitizers:
-        sanitizer_ok, sanitizer_misses = _sanitizer_ok(tree, sanitizers)
+        sanitizer_ok, sanitizer_misses = _sanitizer_ok(resolve_tree(), sanitizers)
 
     replay_meta["passed"] = passed
     if isinstance(consolidated.get("proof"), dict):

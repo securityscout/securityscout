@@ -64,6 +64,16 @@ class GatewayCancelled(Exception):
         super().__init__(f"call {call_id} was killed")
 
 
+def canonical_json_bytes(obj: Any) -> bytes:
+    """Deterministic JSON encoding shared by every hash site.
+
+    `args_hash` here and the transcript hash in `http_session.gateway_execute`
+    must agree on separators/key order, or independently computed hashes for
+    the same logical payload would silently diverge.
+    """
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
+
+
 _LOCK = threading.Lock()
 _IN_FLIGHT: dict[str, threading.Event] = {}
 
@@ -116,9 +126,7 @@ def invoke(
         if event.is_set():
             raise GatewayCancelled(call_id)
 
-        args_hash = hashlib.sha256(
-            json.dumps(args, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        args_hash = hashlib.sha256(canonical_json_bytes(args)).hexdigest()
         result_sha256 = hashlib.sha256(result).hexdigest()
         t = datetime.now(timezone.utc).isoformat()
 
