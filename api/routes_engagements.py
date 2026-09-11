@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from api.app import ApiError
 from triage import db
+from triage import github_org
 
 router = APIRouter()
 
@@ -20,6 +21,10 @@ class EngagementIn(BaseModel):
     name: str
     org: str
     policy_json: dict[str, Any] = {}
+
+
+class EngagementImportIn(BaseModel):
+    org: str
 
 
 def _now() -> str:
@@ -67,3 +72,22 @@ def get_engagement(engagement_id: str, request: Request) -> dict[str, Any]:
     if row is None:
         raise ApiError(404, "not_found", "engagement not found")
     return _engagement(row)
+
+
+@router.post("/engagements/import", status_code=201)
+def import_engagement(body: EngagementImportIn, request: Request) -> dict[str, Any]:
+    org = body.org.strip()
+    if not org:
+        raise ApiError(400, "invalid_request", "org is required")
+
+    gh = getattr(request.app.state, "gh", None)
+    try:
+        result = github_org.import_org(org, db_path=request.app.state.db_path, gh=gh)
+    except RuntimeError as exc:
+        raise ApiError(502, "upstream", str(exc)) from exc
+
+    with db.session(request.app.state.db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM engagements WHERE id = ?", (result["engagement_id"],)
+        ).fetchone()
+    return {**_engagement(row), "repos": result["repos"]}
