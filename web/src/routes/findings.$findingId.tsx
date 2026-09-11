@@ -8,6 +8,14 @@ import { rootRoute } from "./__root";
 
 type ReviewAction = "accept" | "reject" | "accept_risk";
 
+type Ticket = {
+  id: string;
+  sink: string;
+  external_id: string;
+  url: string;
+  published_at: string;
+};
+
 function asApiError(err: unknown): ApiError {
   return err instanceof ApiError ? err : new ApiError(0, "unavailable", "");
 }
@@ -31,6 +39,10 @@ export function FindingPage() {
     id: string;
     status: string;
   } | null>(null);
+  const [ticketsById, setTicketsById] = useState<{
+    id: string;
+    tickets: Ticket[];
+  } | null>(null);
   const status =
     reviewById !== null && reviewById.id === findingId
       ? reviewById.status
@@ -41,10 +53,14 @@ export function FindingPage() {
     replayById !== null && replayById.id === findingId
       ? replayById.status
       : null;
+  const findingTickets =
+    ticketsById !== null && ticketsById.id === findingId
+      ? ticketsById.tickets
+      : [];
 
   const review = useMutation({
     mutationFn: (action: ReviewAction) =>
-      apiRequest<{ id: string; status: string }>(
+      apiRequest<{ id: string; status: string; tickets?: Ticket[] }>(
         `/findings/${findingId}/review`,
         { method: "POST", body: { action } },
       ),
@@ -54,6 +70,7 @@ export function FindingPage() {
     },
     onSuccess: (data) => {
       setReviewById({ id: findingId, status: data.status });
+      setTicketsById({ id: findingId, tickets: data.tickets ?? [] });
     },
     onError: (err: unknown) => {
       setErrorById({ id: findingId, error: asApiError(err) });
@@ -123,7 +140,13 @@ export function FindingPage() {
         <section aria-label="Proof">{finding.proof.kind}</section>
         <section aria-label="Chain" />
         <section aria-label="Knowledge" />
-        <section aria-label="Ticket" />
+        <section aria-label="Ticket">
+          {findingTickets.map((ticket) => (
+            <a key={ticket.id} href={ticket.url}>
+              {ticket.url}
+            </a>
+          ))}
+        </section>
       </div>
       <div className="actions">
         <button type="button" onClick={() => replay.mutate()}>

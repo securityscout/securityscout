@@ -36,10 +36,20 @@ def main() -> None:
     be invisible here yet honored by `require_auth`.
     """
     from api.app import app
+    from triage.tickets import DefaultGithubSink, DefaultJiraSink
 
     host = os.environ.get("TRIAGE_API_HOST") or DEFAULT_HOST
     port = int(os.environ.get("TRIAGE_API_PORT") or DEFAULT_PORT)
     check_bind(host, os.environ.get("TRIAGE_API_TOKEN"))
+
+    # Wired only here, never in api.app.create_app: TestClient(create_app(...))
+    # is how every pytest case builds the app, and tests must never shell out
+    # to a real `gh` or hit a real Jira. `python -m api` is the only listen
+    # path (api-serve.md), so this is the one place a live sink is safe to
+    # default on. Either sink fails closed to `tickets: []` at call time if
+    # `gh`/`JIRA_*` aren't configured on this host.
+    app.state.github = DefaultGithubSink()
+    app.state.jira = DefaultJiraSink()
 
     import uvicorn
 

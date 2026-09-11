@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
 from api.app import ApiError
-from triage import db
+from triage import db, tickets
 from triage.status import (
     REVIEW_TARGET,
     IllegalTransition,
@@ -85,7 +86,9 @@ def list_findings(
 @router.get("/findings/{finding_id}")
 def get_finding(finding_id: str, request: Request) -> dict[str, Any]:
     with db.session(request.app.state.db_path) as conn:
-        return _finding(_get_finding(conn, finding_id))
+        finding = _finding(_get_finding(conn, finding_id))
+        finding["tickets"] = tickets.list_for_finding(conn, finding_id)
+    return finding
 
 
 @router.post("/findings/{finding_id}/replay", status_code=202)
@@ -96,7 +99,7 @@ def replay_finding(finding_id: str, request: Request) -> dict[str, str]:
 
 
 @router.post("/findings/{finding_id}/review")
-def review_finding(finding_id: str, body: ReviewIn, request: Request) -> dict[str, str]:
+def review_finding(finding_id: str, body: ReviewIn, request: Request) -> dict[str, Any]:
     target = REVIEW_TARGET.get(body.action)
     if target is None:
         raise ApiError(400, "invalid_request", f"unknown action {body.action}")
@@ -108,4 +111,25 @@ def review_finding(finding_id: str, body: ReviewIn, request: Request) -> dict[st
             raise ApiError(409, "illegal_transition", str(exc)) from exc
         except TransitionConflict as exc:
             raise ApiError(409, "conflict", str(exc)) from exc
-    return {"id": finding_id, "status": target}
+        result: dict[str, Any] = {"id": finding_id, "status": target}
+        if body.action == "accept":
+            github = getattr(request.app.state, "github", None)
+            jira = getattr(request.app.state, "jira", None)
+            if github is not None or jira is not None:
+                # cas_status above already committed (autocommit connection) —
+                # the finding is published no matter what happens next. Any
+                # failure in the ticketing pipeline itself (not just a caught
+                # sink.create/comment failure inside tickets.publish) must
+                # degrade to tickets: [] rather than surface as a 500 that
+                # would misreport an already-successful accept.
+                try:
+                    result["tickets"] = tickets.publish(
+                        conn, finding_id, github=github, jira=jira
+                    )
+                except Exception as exc:
+                    print(
+                        f"tickets.publish failed for finding {finding_id}: {exc}",
+                        file=sys.stderr,
+                    )
+                    result["tickets"] = []
+    return result
