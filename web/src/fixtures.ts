@@ -50,6 +50,10 @@ export const findings = [
   },
 ] as const;
 
+export const chainHops = [
+  { from_id: "f1", to_id: "f2", kind: "session" },
+] as const;
+
 export type Finding = (typeof findings)[number];
 
 export function findingsForEngagement(engId: string): Finding[] {

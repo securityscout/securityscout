@@ -72,6 +72,7 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
     from api import (
         routes_engagements,
         routes_findings,
+        routes_graph,
         routes_policies,
         routes_runs,
     )
@@ -96,6 +97,7 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
     app.include_router(routes_engagements.router, dependencies=deps)
     app.include_router(routes_runs.router, dependencies=deps)
     app.include_router(routes_findings.router, dependencies=deps)
+    app.include_router(routes_graph.router, dependencies=deps)
     app.include_router(routes_policies.router, dependencies=deps)
     return app
 

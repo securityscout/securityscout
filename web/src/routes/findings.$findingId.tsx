@@ -1,9 +1,9 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { createRoute } from "@tanstack/react-router";
+import { createRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
 import { ApiError, apiRequest } from "../api";
-import { findingById } from "../fixtures";
+import { chainHops, findingById } from "../fixtures";
 import { rootRoute } from "./__root";
 
 type ReviewAction = "accept" | "reject" | "accept_risk";
@@ -18,6 +18,17 @@ type Ticket = {
 
 function asApiError(err: unknown): ApiError {
   return err instanceof ApiError ? err : new ApiError(0, "unavailable", "");
+}
+
+function ChainEnd({ findingId, endId }: { findingId: string; endId: string }) {
+  if (endId === findingId) {
+    return <span>{endId}</span>;
+  }
+  return (
+    <Link to="/findings/$findingId" params={{ findingId: endId }}>
+      {endId}
+    </Link>
+  );
 }
 
 export function FindingPage() {
@@ -53,6 +64,9 @@ export function FindingPage() {
     replayById !== null && replayById.id === findingId
       ? replayById.status
       : null;
+  const hops = chainHops.filter(
+    (hop) => hop.from_id === findingId || hop.to_id === findingId,
+  );
   const findingTickets =
     ticketsById !== null && ticketsById.id === findingId
       ? ticketsById.tickets
@@ -138,7 +152,17 @@ export function FindingPage() {
           {finding.file}:{finding.line}
         </section>
         <section aria-label="Proof">{finding.proof.kind}</section>
-        <section aria-label="Chain" />
+        <section aria-label="Chain">
+          <ol>
+            {hops.map((hop) => (
+              <li key={`${hop.from_id}-${hop.to_id}`}>
+                <ChainEnd findingId={findingId} endId={hop.from_id} />
+                <span className="mono"> {hop.kind} → </span>
+                <ChainEnd findingId={findingId} endId={hop.to_id} />
+              </li>
+            ))}
+          </ol>
+        </section>
         <section aria-label="Knowledge" />
         <section aria-label="Ticket">
           {findingTickets.map((ticket) => (
