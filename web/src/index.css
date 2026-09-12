@@ -226,6 +226,18 @@ label {
   padding-left: 1.1rem;
 }
 
+.case-file {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.case-file .case-file-wide {
+  grid-column: 1 / -1;
+}
+
+.case-file section p {
+  margin: 0 0 0.35rem;
+}
+
 .group-toggle {
   display: flex;
   align-items: center;

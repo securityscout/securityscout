@@ -147,12 +147,16 @@ export function FindingPage() {
         <span className="mono">{finding.sha}</span>
         <span>{status}</span>
       </header>
-      <div className="panes">
+      <div className="panes case-file">
         <section aria-label="Source">
           {finding.file}:{finding.line}
         </section>
-        <section aria-label="Proof">{finding.proof.kind}</section>
-        <section aria-label="Chain">
+        <section aria-label="Proof">
+          <p>{finding.proof.kind}</p>
+          <p className="mono">{finding.proof.artifact_uri}</p>
+          <p className="mono">{finding.proof.replay.command}</p>
+        </section>
+        <section aria-label="Chain" className="case-file-wide">
           <ol>
             {hops.map((hop) => (
               <li key={`${hop.from_id}-${hop.to_id}`}>
@@ -163,8 +167,8 @@ export function FindingPage() {
             ))}
           </ol>
         </section>
-        <section aria-label="Knowledge" />
-        <section aria-label="Ticket">
+        <section aria-label="Knowledge" className="case-file-wide" />
+        <section aria-label="Ticket" className="case-file-wide">
           {findingTickets.map((ticket) => (
             <a key={ticket.id} href={ticket.url}>
               {ticket.url}
