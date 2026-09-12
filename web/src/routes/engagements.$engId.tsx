@@ -5,8 +5,9 @@ import {
   flexRender,
   getCoreRowModel,
   useReactTable,
+  type Row as TableRow,
 } from "@tanstack/react-table";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { ApiError, apiRequest } from "../api";
 import { findingById, findingsForEngagement } from "../fixtures";
@@ -61,6 +62,31 @@ const columns = [
   columnHelper.accessor("rule_id", { header: "Rule" }),
 ];
 
+const SEVERITY_TOKENS: Record<string, string> = {
+  critical: "--color-sev-critical",
+  high: "--color-sev-high",
+  medium: "--color-sev-medium",
+};
+
+function severityToken(severity: string): string {
+  return SEVERITY_TOKENS[severity.toLowerCase()] ?? "--color-sev-low";
+}
+
+type RuleGroup = { ruleId: string; rows: TableRow<Row>[] };
+
+function groupByRule(rows: TableRow<Row>[]): RuleGroup[] {
+  const groups: RuleGroup[] = [];
+  for (const row of rows) {
+    const group = groups.find((each) => each.ruleId === row.original.rule_id);
+    if (group) {
+      group.rows.push(row);
+    } else {
+      groups.push({ ruleId: row.original.rule_id, rows: [row] });
+    }
+  }
+  return groups;
+}
+
 export function EngagementPage() {
   const { engId } = engagementRoute.useParams();
   const navigate = useNavigate();
@@ -84,6 +110,16 @@ export function EngagementPage() {
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
+
+  const groups = useMemo(
+    () => groupByRule(table.getRowModel().rows),
+    [table, rows],
+  );
+  const orderedIds = useMemo(
+    () => groups.flatMap((group) => group.rows.map((row) => row.original.id)),
+    [groups],
+  );
+  const selected = rows.find((row) => row.id === selectedId);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -114,17 +150,17 @@ export function EngagementPage() {
         return;
       }
       setSelectedId((current) => {
-        const index = rows.findIndex((row) => row.id === current);
+        const index = orderedIds.indexOf(current);
         const next =
           event.key === "j"
-            ? Math.min(index + 1, rows.length - 1)
+            ? Math.min(index + 1, orderedIds.length - 1)
             : Math.max(index - 1, 0);
-        return rows[next]?.id ?? current;
+        return orderedIds[next] ?? current;
       });
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [rows, selectedId, navigate]);
+  }, [orderedIds, selectedId, navigate]);
 
   return (
     <>
@@ -133,46 +169,84 @@ export function EngagementPage() {
           {asApiError(error).error} {asApiError(error).detail}
         </p>
       ) : null}
-      <table>
-        <thead>
-          {table.getHeaderGroups().map((group) => (
-            <tr key={group.id}>
-              {group.headers.map((header) => (
-                <th key={header.id}>
-                  {flexRender(
-                    header.column.columnDef.header,
-                    header.getContext(),
-                  )}
-                </th>
-              ))}
-            </tr>
-          ))}
-        </thead>
-        <tbody>
-          {table.getRowModel().rows.map((row) => (
-            <tr
-              key={row.id}
-              aria-selected={row.original.id === selectedId}
-              onClick={() => setSelectedId(row.original.id)}
-            >
-              {row.getVisibleCells().map((cell) => (
-                <td key={cell.id}>
-                  {cell.column.id === "id" ? (
-                    <Link
-                      to="/findings/$findingId"
-                      params={{ findingId: row.original.id }}
-                    >
-                      {row.original.id}
-                    </Link>
-                  ) : (
-                    flexRender(cell.column.columnDef.cell, cell.getContext())
-                  )}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <h1 className="page-title">Findings</h1>
+      <label className="group-toggle">
+        <input type="checkbox" checked disabled />
+        Group by rule
+      </label>
+      <div className="findings-pane">
+        <table>
+          <thead>
+            {table.getHeaderGroups().map((group) => (
+              <tr key={group.id}>
+                {group.headers.map((header) => (
+                  <th key={header.id}>
+                    {flexRender(
+                      header.column.columnDef.header,
+                      header.getContext(),
+                    )}
+                  </th>
+                ))}
+              </tr>
+            ))}
+          </thead>
+          <tbody>
+            {groups.map((group) => (
+              <Fragment key={group.ruleId}>
+                <tr className="group-head">
+                  <th scope="colgroup" colSpan={columns.length}>
+                    {group.ruleId}
+                  </th>
+                </tr>
+                {group.rows.map((row) => (
+                  <tr
+                    key={row.id}
+                    aria-selected={row.original.id === selectedId}
+                    onClick={() => setSelectedId(row.original.id)}
+                  >
+                    {row.getVisibleCells().map((cell) => (
+                      <td
+                        key={cell.id}
+                        style={
+                          cell.column.id === "severity"
+                            ? {
+                                color: `var(${severityToken(row.original.severity)})`,
+                              }
+                            : undefined
+                        }
+                      >
+                        {cell.column.id === "id" ? (
+                          <Link
+                            to="/findings/$findingId"
+                            params={{ findingId: row.original.id }}
+                          >
+                            {row.original.id}
+                          </Link>
+                        ) : (
+                          flexRender(
+                            cell.column.columnDef.cell,
+                            cell.getContext(),
+                          )
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+        <section className="detail-pane" aria-label="Detail">
+          {selected ? (
+            <>
+              <p className="mono">
+                {selected.file}:{selected.line}
+              </p>
+              <p>{selected.status}</p>
+            </>
+          ) : null}
+        </section>
+      </div>
     </>
   );
 }
