@@ -1,6 +1,8 @@
 import { createRootRoute, Link, Outlet } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
+import { ApiError, apiRequest } from "../api";
+
 const NAV = [
   { label: "Engagements", to: "/" },
   { label: "Runs", to: "/engagements/$engId/runs/$runId", params: { engId: "eng_1", runId: "run_1" } },
@@ -15,10 +17,47 @@ function dialogItems(dialog: HTMLElement | null) {
   return dialog ? [...dialog.querySelectorAll<HTMLElement>("a, button")] : [];
 }
 
+function asApiError(err: unknown): ApiError {
+  return err instanceof ApiError ? err : new ApiError(0, "unavailable", "");
+}
+
+async function killAllRuns(): Promise<ApiError[]> {
+  const { engagements } = await apiRequest<{ engagements: { id: string }[] }>(
+    "/engagements",
+  );
+  const failures: ApiError[] = [];
+  for (const eng of engagements) {
+    const { runs } = await apiRequest<{ runs: { id: string; status: string }[] }>(
+      `/engagements/${eng.id}/runs`,
+    );
+    for (const run of runs) {
+      if (run.status !== "queued" && run.status !== "running") {
+        continue;
+      }
+      try {
+        await apiRequest(`/runs/${run.id}/cancel`, { method: "POST" });
+      } catch (err) {
+        failures.push(asApiError(err));
+      }
+    }
+  }
+  return failures;
+}
+
 export function Shell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [killErrors, setKillErrors] = useState<ApiError[]>([]);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+
+  async function handleKill() {
+    setKillErrors([]);
+    try {
+      setKillErrors(await killAllRuns());
+    } catch (err) {
+      setKillErrors([asApiError(err)]);
+    }
+  }
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -95,8 +134,15 @@ export function Shell() {
             Command palette
           </button>
           <span>Budget remaining</span>
-          <button type="button">Kill switch</button>
+          <button type="button" onClick={() => void handleKill()}>
+            Kill switch
+          </button>
         </div>
+        {killErrors.length > 0 ? (
+          <p role="alert">
+            {killErrors.map((err) => `${err.error} ${err.detail}`).join("; ")}
+          </p>
+        ) : null}
         <div className="page">
           <Outlet />
         </div>
