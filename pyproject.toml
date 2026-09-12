@@ -20,6 +20,7 @@ dependencies = [
   "openai>=3.8.0",
   "httpx>=0.28",
   "pyyaml>=6",
+  "docling>=2",
 ]
 
 [project.optional-dependencies]

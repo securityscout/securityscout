@@ -1,0 +1,15 @@
+{
+  "request": {
+    "method": "GET",
+    "url": "https://v2.fixture.invalid/v2/orders/1"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "server": "python/3.11.8"
+    },
+    "body_excerpt": "{\"id\": 1, \"owner\": \"u2\", \"total\": \"42.00\"}"
+  },
+  "timing_ms": 37
+}
