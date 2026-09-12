@@ -31,6 +31,10 @@ body {
   margin: 0;
 }
 
+.page-title {
+  font-family: var(--font-serif);
+}
+
 .shell {
   display: grid;
   grid-template-columns: 11.5rem 1fr;

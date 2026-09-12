@@ -132,6 +132,7 @@ export function EngagementsPage() {
 
   return (
     <>
+      <h1 className="page-title">Engagements</h1>
       {alert ? (
         <p role="alert">
           {alert.error} {alert.detail}
@@ -174,12 +175,13 @@ export function EngagementsPage() {
             <th>ID</th>
             <th>Name</th>
             <th>Org</th>
+            <th>Env</th>
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={3}>
+              <td colSpan={4}>
                 No GitHub token. Paste a fine-scoped PAT or run{" "}
                 <code>gh auth login</code>.
               </td>
@@ -194,6 +196,7 @@ export function EngagementsPage() {
                 </td>
                 <td>{row.name}</td>
                 <td>{row.org}</td>
+                <td></td>
               </tr>
             ))
           )}
