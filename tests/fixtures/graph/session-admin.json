@@ -1,0 +1,18 @@
+{
+  "request": {
+    "method": "GET",
+    "url": "https://graph-fixture.invalid/admin/users",
+    "headers": {
+      "cookie": "session=<leaked-session-id>"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "server": "werkzeug/3.0.1 python/3.11.8"
+    },
+    "body_excerpt": "{\"users\": [{\"id\": 1, \"email\": \"admin@graph-fixture.invalid\", \"role\": \"admin\"}]}"
+  },
+  "timing_ms": 37
+}
