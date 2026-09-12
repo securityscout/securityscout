@@ -67,7 +67,8 @@ help:
 	@echo "  recon                 — cache recon for REPO + SHA + WORKDIR"
 	@echo "  triage                — two-pass worker for FINDING_ID"
 	@echo "  verify-verdicts       — harness replay for FINDING_ID"
-	@echo "  report|calibrate      — not yet implemented"
+	@echo "  calibrate             — run the calibration suite, print pass_k JSON"
+	@echo "  report                — not yet implemented"
 
 # ---------------------------------------------------------------------------
 # Bootstrap
@@ -274,7 +275,14 @@ check-agent-config:
 	  "$(VENV_PY)" -m pytest .claude/check_config.py -q -p no:cacheprovider; \
 	fi
 
-.PHONY: report calibrate
-report calibrate:
-	@echo "ERROR: '$@' is not yet implemented."
+.PHONY: report
+report:
+	@echo "ERROR: 'report' is not yet implemented."
 	@exit 2
+
+.PHONY: calibrate
+calibrate:
+	@if [ ! -x "$(VENV_PY)" ]; then \
+	  echo "ERROR: venv not found at $(VENV_DIR). Run 'make bootstrap' first."; exit 1; \
+	fi
+	@"$(VENV_PY)" -m triage.calibrate --db "$(TRIAGE_DB)" --suite-id baseline
