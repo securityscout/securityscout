@@ -1,3 +1,5 @@
-import "@testing-library/jest-dom/vitest";
+import '@testing-library/jest-dom/vitest';
 
-window.scrollTo = () => {};
+if (typeof window !== 'undefined') {
+  window.scrollTo = () => {};
+}
