@@ -1,4 +1,4 @@
-"""Bootstrap gate — leftover contracts that do not spawn cursor-agent."""
+"""Bootstrap gate — contracts that do not spawn cursor-agent."""
 
 from __future__ import annotations
 

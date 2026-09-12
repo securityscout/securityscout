@@ -190,8 +190,8 @@ def merge_or_insert(
 def default_specialist(vuln_class: str) -> dict | None:
     """Fixture stand-in for a class agent.
 
-    Only `injection` returns a hypothesis this slice, so acceptance does
-    not depend on five live proofs. A real specialist is a model call
+    Only `injection` returns a hypothesis, so acceptance does not
+    depend on five live proofs. A real specialist is a model call
     behind the tool gateway and returns the same shape.
     """
     if vuln_class != FIXTURE_CLASS:

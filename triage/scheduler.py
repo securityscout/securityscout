@@ -1,8 +1,7 @@
 """Org-wide hunt scheduler: dry-run enqueue and the kill switch (library).
 
-This slice only ever writes `queued` rows — no worker moves a run to
-`running`, so `enqueue` does not spawn anything regardless of `dry_run`.
-A real dispatcher is a later slice's job.
+`enqueue` only inserts `queued` rows. Nothing here moves a run to
+`running` or spawns a worker, including when `dry_run` is false.
 """
 
 from __future__ import annotations

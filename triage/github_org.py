@@ -1,7 +1,8 @@
 """GitHub org inventory: import an org's repos and clone one at a pinned SHA.
 
 `import_org` writes one `engagements` row plus one `assets` row per repo
-(`kind="repo"`), reusing the tables P4/S1 already ship — no new DDL.
+(`kind="repo"`), reusing the existing `engagements` and `assets`
+tables — no new DDL.
 `clone_at_sha` fetches a tarball snapshot via `gh`, not `git clone`: the
 extracted tree has no `.git`, so there is nothing to push and
 TRIAGE_READONLY_TARGET_REPOS holds by construction.

@@ -74,8 +74,8 @@ def test_bootstrap_pip_installs_editable_dev() -> None:
 
 
 def test_main_dependencies_declare_httpx() -> None:
-    # httpx moved out of the dev extra in P6: triage/http_session.py imports
-    # it at runtime (persistent HTTP capture), not just tests/test_api.py's
+    # httpx is a main dependency: triage/http_session.py imports it at
+    # runtime (persistent HTTP capture), not just tests/test_api.py's
     # TestClient. Split on the optional-dependencies header rather than
     # bracket-matching the array — uvicorn[standard]'s own "]" would end a
     # non-greedy regex early.

@@ -40,8 +40,8 @@ SKILL_FILE  := $(SKILL_HOME)/SKILL.md
 VENDORED_SKILL ?= $(CURDIR)/data/sast-triage.SKILL.md
 
 # Only `gh` is needed on the laptop today (org inventory / clone).
-# Sandbox scanners (trivy, osv-scanner) and jbang land with later
-# workstreams, not in this bootstrap.
+# Sandbox scanners (trivy, osv-scanner) and jbang are not part of
+# this bootstrap.
 
 .PHONY: help
 help:
