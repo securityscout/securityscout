@@ -226,6 +226,23 @@ label {
   padding-left: 1.1rem;
 }
 
+[data-live='true'] {
+  color: var(--color-signal);
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-live='true'] {
+    animation: none;
+  }
+}
+
 .case-file {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
