@@ -28,6 +28,20 @@ const fixture: Knowledge = {
   sources: fixtureData.sources.map((source) => ({ ...source })),
 };
 
+function mergeIndexed(old: Knowledge | undefined, incoming: KnowledgeSource[]): Knowledge {
+  const current = old?.sources ?? [];
+  const kept = current.map(
+    (source) => incoming.find((row) => row.id === source.id) ?? source,
+  );
+  const appended = incoming.filter(
+    (row) => !current.some((source) => source.id === row.id),
+  );
+  return {
+    halflife_days: old?.halflife_days ?? fixture.halflife_days,
+    sources: [...kept, ...appended],
+  };
+}
+
 function asApiError(err: unknown): ApiError {
   return err instanceof ApiError ? err : new ApiError(0, "unavailable", "");
 }
@@ -57,7 +71,8 @@ export function KnowledgePage() {
   const [kind, setKind] = useState("all");
   const fileInput = useRef<HTMLInputElement>(null);
   const jqlInput = useRef<HTMLInputElement>(null);
-  const openedAfterJira = useRef<string | null>(null);
+  const githubInput = useRef<HTMLInputElement>(null);
+  const openedAfterIndex = useRef<string | null>(null);
 
   const {
     data: knowledge,
@@ -92,21 +107,29 @@ export function KnowledgePage() {
       }),
     onSuccess: (added) => {
       const sourceId = added.sources.at(-1)?.id ?? null;
-      openedAfterJira.current = sourceId;
-      queryClient.setQueryData<Knowledge>(["knowledge"], (old) => {
-        const current = old?.sources ?? [];
-        const incoming = added.sources;
-        const kept = current.map(
-          (source) => incoming.find((row) => row.id === source.id) ?? source,
-        );
-        const appended = incoming.filter(
-          (row) => !current.some((source) => source.id === row.id),
-        );
-        return {
-          halflife_days: old?.halflife_days ?? fixture.halflife_days,
-          sources: [...kept, ...appended],
-        };
-      });
+      openedAfterIndex.current = sourceId;
+      queryClient.setQueryData<Knowledge>(["knowledge"], (old) =>
+        mergeIndexed(old, added.sources),
+      );
+      if (sourceId) {
+        setKind("all");
+        navigate({ to: "/knowledge", search: { source: sourceId } });
+      }
+    },
+  });
+
+  const github = useMutation({
+    mutationFn: (q: string) =>
+      apiRequest<{ q: string; sources: KnowledgeSource[] }>("/knowledge/github-issues", {
+        method: "POST",
+        body: { q },
+      }),
+    onSuccess: (added) => {
+      const sourceId = added.sources.at(-1)?.id ?? null;
+      openedAfterIndex.current = sourceId;
+      queryClient.setQueryData<Knowledge>(["knowledge"], (old) =>
+        mergeIndexed(old, added.sources),
+      );
       if (sourceId) {
         setKind("all");
         navigate({ to: "/knowledge", search: { source: sourceId } });
@@ -119,13 +142,14 @@ export function KnowledgePage() {
   );
   const opened =
     sources.find((source) => source.id === selectedId) ??
-    sources.find((source) => source.id === openedAfterJira.current) ??
+    sources.find((source) => source.id === openedAfterIndex.current) ??
     sources[0] ??
     null;
   const alerts = [
     isError ? asApiError(error) : null,
     upload.isError ? asApiError(upload.error) : null,
     jira.isError ? asApiError(jira.error) : null,
+    github.isError ? asApiError(github.error) : null,
   ].filter((item): item is ApiError => item !== null);
 
   return (
@@ -165,7 +189,26 @@ export function KnowledgePage() {
           JQL
           <input ref={jqlInput} />
         </label>
-        <button type="submit">Index Jira</button>
+        <button type="submit" disabled={jira.isPending}>
+          Index Jira
+        </button>
+      </form>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          const q = githubInput.current?.value.trim() ?? "";
+          if (q) {
+            github.mutate(q);
+          }
+        }}
+      >
+        <label>
+          GitHub issues
+          <input ref={githubInput} />
+        </label>
+        <button type="submit" disabled={github.isPending}>
+          Index GitHub issues
+        </button>
       </form>
       <label>
         Kind
@@ -200,7 +243,7 @@ export function KnowledgePage() {
             <>
               <h2>{opened.citation}</h2>
               <p className="mono">
-                {opened.kind === "jira"
+                {opened.kind === "jira" || opened.kind === "github_issue"
                   ? opened.uri
                   : `page ${page ?? opened.page}`}
               </p>

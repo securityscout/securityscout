@@ -1,4 +1,4 @@
-"""Knowledge sources: list, source detail, cited page, PDF upload, Jira JQL."""
+"""Knowledge sources: list, source detail, cited page, PDF, Jira, GitHub issues."""
 
 from __future__ import annotations
 
@@ -22,6 +22,10 @@ class PdfUpload(BaseModel):
 
 class JiraSearchIn(BaseModel):
     jql: str
+
+
+class GithubIssuesIn(BaseModel):
+    q: str
 
 
 def _preview(source: dict[str, Any]) -> dict[str, Any]:
@@ -147,6 +151,40 @@ def post_knowledge_jira(body: JiraSearchIn, request: Request) -> dict[str, Any]:
             db_path=db_path,
             source_ids=[row["source_id"] for row in result["sources"]],
         ),
+    }
+
+
+@router.post("/knowledge/github-issues", status_code=201)
+def post_knowledge_github_issues(body: GithubIssuesIn, request: Request) -> dict[str, Any]:
+    """Live issue search against the injected runner; persist each hit.
+
+    `app.state.github_search` is the search runner. `app.state.github`
+    is only used when it is callable — a ticket sink parked there is
+    ignored so `python -m api` can keep `DefaultGithubSink`. Unset, the
+    library default mints an installation token. A failed search is a
+    fixed-string 502.
+    """
+    query = body.q.strip()
+    if not query:
+        raise ApiError(400, "invalid_request", "q is required")
+    if len(query) > knowledge.GITHUB_Q_MAX:
+        raise ApiError(400, "invalid_request", "q is too long")
+    db_path = request.app.state.db_path
+    try:
+        result = knowledge.search_issues(
+            db_path=db_path,
+            q=query,
+            github=knowledge.github_runner_from_state(request.app.state),
+        )
+    except RuntimeError as exc:
+        raise ApiError(502, "upstream", "github search failed") from exc
+    return {
+        "q": result["q"],
+        "sources": knowledge.previews(
+            db_path=db_path,
+            source_ids=[row["source_id"] for row in result["sources"]],
+        ),
+        "incomplete": result["incomplete"],
     }
 
 

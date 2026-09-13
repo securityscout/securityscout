@@ -1,24 +1,31 @@
-"""Knowledge ingest: PDF pages and Jira issues, decay, SHA binding, retention.
+"""Knowledge ingest: PDF, Jira, and GitHub issues; decay; SHA binding.
 
-A chunk is a hypothesis, never a verdict. PDF and Jira bodies are
-untrusted: text is redacted and stored, and retrieval hands back a
-`source_id` + locator for a hunter to cite. Nothing here writes
-`runs.scope_json` or `runs.blast_radius` — the gateway reads those off
-the run row, which is what makes an injected instruction inert.
+A chunk is a hypothesis, never a verdict. PDF, Jira, and GitHub
+issue bodies are untrusted: text is redacted and stored, and
+retrieval hands back a `source_id` + locator for a hunter to cite.
+Nothing here writes `runs.scope_json` or `runs.blast_radius` — the
+gateway reads those off the run row, which is what makes an injected
+instruction inert. GitHub issue ingest authenticates as an app
+installation, not with an operator `gh` token.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
 import os
 import re
+import subprocess
+import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlencode
 
 from triage import gateway
 from triage.config import REPO_ROOT
@@ -28,6 +35,7 @@ from triage.status import cas_status
 from triage.verifier import strip_replay_passed, verify_finding
 
 JiraRunner = Callable[[str, str, dict | None], tuple[int, Any]]
+GithubRunner = Callable[[str, str, dict | None], tuple[int, Any]]
 
 KINDS = ("pdf", "jira", "github_issue", "github_advisory")
 HALFLIFE_ENV = "KNOWLEDGE_HALFLIFE_DAYS"
@@ -54,6 +62,18 @@ JIRA_JQL_MAX = 8192
 JIRA_COMMENT_PAGE = 50
 JIRA_COMMENT_PAGE_CAP = 20
 JIRA_CLOSED_NAMES = frozenset({"closed", "done", "resolved", "fixed"})
+GITHUB_API = "https://api.github.com"
+GITHUB_API_VERSION = "2026-03-10"
+GITHUB_USER_AGENT = "security-scout"
+GITHUB_SEARCH_PATH = "/search/issues"
+GITHUB_SEARCH_MAX = 50
+GITHUB_Q_MAX = 256
+GITHUB_COMMENT_PAGE = 100
+GITHUB_COMMENT_PAGE_CAP = 20
+GITHUB_COMMENT_CALL_CAP = 20
+GITHUB_DEFAULT_LABELS = ("security", "vulnerability", "advisory")
+GITHUB_IAT_SKEW = 60
+_IAT: dict[str, Any] = {"token": "", "exp": 0.0}
 
 # Emails, customer account ids and credentials never reach a chunk: the
 # PII gate is code, not a line in a prompt.
@@ -350,6 +370,171 @@ def runner_from_state(state: Any) -> JiraRunner | None:
     return None
 
 
+def github_runner_from_state(state: Any) -> GithubRunner | None:
+    """Prefer `github_search`. Then a callable on `github`.
+
+    A non-callable ticket sink on `github` is ignored. A callable
+    there is still used when `github_search` is unset.
+    """
+    for name in ("github_search", "github"):
+        value = getattr(state, name, None)
+        if callable(value):
+            return value
+    return None
+
+
+def _github_labels() -> list[str]:
+    raw = os.environ.get("TRIAGE_GITHUB_ISSUE_LABELS")
+    if raw is None:
+        return list(GITHUB_DEFAULT_LABELS)
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _construct_github_q(query: str) -> str:
+    parts = [query]
+    lower = query.lower()
+    if "is:issue" not in lower and "is:pull-request" not in lower:
+        parts.append("is:issue")
+    labels = _github_labels()
+    if labels:
+        parts.append("label:" + ",".join(labels))
+    return " ".join(parts)
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _openssl_rs256(signing: bytes, key_path: str) -> bytes | None:
+    try:
+        proc = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", key_path],
+            input=signing,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    return proc.stdout
+
+
+def _github_app_jwt() -> str | None:
+    """RS256 JWT for minting an installation token.
+
+    PATH is signed in place. An env PEM is written to a 0o600 temp
+    that is unlinked in finally. openssl so this module adds no JWT library.
+    """
+    app_id = os.environ.get("GITHUB_APP_ID")
+    if not app_id:
+        return None
+    now = int(time.time())
+    header = _b64url(b'{"alg":"RS256","typ":"JWT"}')
+    payload = _b64url(
+        json.dumps(
+            {"iat": now - 60, "exp": now + 540, "iss": app_id},
+            separators=(",", ":"),
+        ).encode()
+    )
+    signing = f"{header}.{payload}".encode()
+    path = (os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH") or "").strip()
+    raw = os.environ.get("GITHUB_APP_PRIVATE_KEY")
+    if path:
+        signature = _openssl_rs256(signing, path)
+    elif raw:
+        pem = raw.replace("\\n", "\n").encode()
+        key_path = ""
+        try:
+            handle, key_path = tempfile.mkstemp(suffix=".pem")
+            os.fchmod(handle, 0o600)
+            with os.fdopen(handle, "wb") as keyfile:
+                keyfile.write(pem)
+            signature = _openssl_rs256(signing, key_path)
+        except OSError:
+            signature = None
+        finally:
+            if key_path:
+                try:
+                    os.unlink(key_path)
+                except OSError:
+                    pass
+    else:
+        return None
+    if not signature:
+        return None
+    return f"{header}.{payload}.{_b64url(signature)}"
+
+
+def _installation_token() -> str | None:
+    import httpx
+
+    now = time.time()
+    if _IAT["token"] and float(_IAT["exp"] or 0) > now + GITHUB_IAT_SKEW:
+        return str(_IAT["token"])
+    jwt_token = _github_app_jwt()
+    install = os.environ.get("GITHUB_APP_INSTALLATION_ID")
+    if not jwt_token or not install:
+        return None
+    try:
+        response = httpx.request(
+            "POST",
+            f"{GITHUB_API}/app/installations/{install}/access_tokens",
+            headers={
+                "Authorization": f"Bearer {jwt_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": GITHUB_API_VERSION,
+                "User-Agent": GITHUB_USER_AGENT,
+            },
+            json={"permissions": {"issues": "read", "metadata": "read"}},
+            timeout=30.0,
+        )
+    except (httpx.TimeoutException, httpx.HTTPError, OSError):
+        return None
+    if not (200 <= response.status_code < 300):
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    token = str(body.get("token") or "")
+    if not token:
+        return None
+    exp = _stamp(str(body.get("expires_at") or "").replace("Z", "+00:00"))
+    _IAT["token"] = token
+    _IAT["exp"] = exp.timestamp() if exp else now + 3600
+    return token
+
+
+def _default_github(method: str, path: str, body: dict | None = None) -> tuple[int, Any]:
+    import httpx
+
+    token = _installation_token()
+    if not token:
+        return -1, {}
+    try:
+        kwargs: dict[str, Any] = {
+            "headers": {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": GITHUB_API_VERSION,
+                "User-Agent": GITHUB_USER_AGENT,
+            },
+            "timeout": 30.0,
+        }
+        if body is not None:
+            kwargs["json"] = body
+        response = httpx.request(method, f"{GITHUB_API}{path}", **kwargs)
+    except (httpx.TimeoutException, httpx.HTTPError, OSError):
+        return -1, {}
+    if 200 <= response.status_code < 300:
+        try:
+            return 0, response.json()
+        except ValueError:
+            return -1, {}
+    return response.status_code, {}
+
+
 def adf_to_text(node: Any) -> str:
     if isinstance(node, str):
         return node
@@ -621,6 +806,243 @@ def search_jql(
             if written:
                 sources.append(written)
     return {"jql": query, "sources": sources}
+
+
+def _github_assessment_date(updated: Any, moment: datetime) -> str:
+    parsed = _stamp(str(updated or "").replace("Z", "+00:00"))
+    return parsed.date().isoformat() if parsed else moment.date().isoformat()
+
+
+def _github_locator(item: dict) -> str | None:
+    if item.get("pull_request") is not None:
+        return None
+    try:
+        number = int(item.get("number"))
+    except (TypeError, ValueError):
+        return None
+    parts = str(item.get("repository_url") or "").rstrip("/").split("/")
+    if len(parts) < 2:
+        return None
+    owner, repo = parts[-2], parts[-1]
+    if not owner or not repo or repo == "repos":
+        return None
+    return f"{owner}/{repo}#{number}"
+
+
+def _parse_github_comment_rows(raw_list: Any) -> list[dict]:
+    if not isinstance(raw_list, list):
+        return []
+    comments = []
+    for raw in raw_list:
+        if not isinstance(raw, dict):
+            continue
+        user = raw.get("user")
+        comments.append(
+            {
+                "id": str(raw.get("id") or ""),
+                "author": str(user.get("login") or "") if isinstance(user, dict) else "",
+                "created": str(raw.get("created_at") or ""),
+                "text": redact(str(raw.get("body") or "")),
+            }
+        )
+    return comments
+
+
+def _github_comments(
+    item: dict,
+    *,
+    locator: str,
+    runner: GithubRunner,
+    comment_calls: list[int],
+) -> list[dict]:
+    total = item.get("comments")
+    if not isinstance(total, int) or total <= 0:
+        return []
+    owner_repo, _, number = locator.partition("#")
+    owner, _, repo = owner_repo.partition("/")
+    comments: list[dict] = []
+    page = 1
+    first = True
+    while len(comments) < total and page <= GITHUB_COMMENT_PAGE_CAP:
+        if comment_calls[0] >= GITHUB_COMMENT_CALL_CAP:
+            break
+        comment_calls[0] += 1
+        rc, payload = runner(
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{number}/comments"
+            f"?per_page={GITHUB_COMMENT_PAGE}&page={page}",
+            None,
+        )
+        if rc != 0:
+            if first:
+                raise RuntimeError("github search failed")
+            break
+        first = False
+        extra = _parse_github_comment_rows(payload)
+        if not extra:
+            break
+        comments.extend(extra)
+        page += 1
+    return comments
+
+
+def _upsert_github_issue(
+    conn,
+    item: dict,
+    *,
+    moment: datetime,
+    runner: GithubRunner,
+    sha_hint: str | None,
+    repo_globs: list[str] | None,
+    app_name: str | None,
+    pinned: bool,
+    comment_calls: list[int],
+) -> dict | None:
+    locator = _github_locator(item)
+    if not locator:
+        return None
+    title = str(item.get("title") or locator)
+    body = redact(str(item.get("body") or ""))
+    comments = _github_comments(
+        item, locator=locator, runner=runner, comment_calls=comment_calls
+    )
+    status = "fixed" if str(item.get("state") or "") == "closed" else "open"
+    assessment_date = _github_assessment_date(item.get("updated_at"), moment)
+    digest = hashlib.sha256(
+        gateway.canonical_json_bytes(
+            {
+                "locator": locator,
+                "title": title,
+                "body": body,
+                "comments": [comment["text"] for comment in comments],
+            }
+        )
+    ).hexdigest()
+
+    existing = conn.execute(
+        "SELECT id FROM knowledge_sources WHERE kind = 'github_issue' AND uri = ?",
+        (locator,),
+    ).fetchone()
+    previous_pinned = False
+    if existing:
+        source_id = existing["id"]
+        old = conn.execute(
+            "SELECT meta_json FROM knowledge_chunks WHERE source_id = ? ORDER BY rowid",
+            (source_id,),
+        ).fetchone()
+        previous_pinned = bool(_meta(old["meta_json"] if old else None).get("pinned"))
+        conn.execute("DELETE FROM knowledge_chunks WHERE source_id = ?", (source_id,))
+        conn.execute(
+            "UPDATE knowledge_sources SET title = ?, assessment_date = ?, sha256 = ? WHERE id = ?",
+            (title, assessment_date, digest, source_id),
+        )
+    else:
+        source_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO knowledge_sources (id, kind, title, uri, assessment_date, sha256) "
+            "VALUES (?, 'github_issue', ?, ?, ?, ?)",
+            (source_id, title, locator, assessment_date, digest),
+        )
+
+    meta: dict[str, Any] = {
+        "source_kind": "github_issue",
+        "repo_globs": list(repo_globs or []),
+        "sha_hint": sha_hint or "",
+        "app_name": app_name or "",
+        "package_hint": "",
+        "ingested_at": moment.isoformat(),
+        "assessment_date": assessment_date,
+        "status": status,
+        "pinned": bool(pinned) or previous_pinned,
+        "comments": comments,
+    }
+    lines = [body]
+    if status == "fixed":
+        enrich = _jira_enrichment(body, comments)
+        meta.update(enrich)
+        lines.extend(enrich[key] for key in ("tried", "ruled_out", "fix") if enrich[key])
+    conn.execute(
+        "INSERT INTO knowledge_chunks (id, source_id, locator, text, embedding, meta_json) "
+        "VALUES (?, ?, ?, ?, NULL, ?)",
+        (
+            uuid.uuid4().hex,
+            source_id,
+            locator,
+            "\n".join(part for part in lines if part),
+            json.dumps(meta, ensure_ascii=False),
+        ),
+    )
+    return {
+        "source_id": source_id,
+        "locator": locator,
+        "status": status,
+        "title": title,
+    }
+
+
+def search_issues(
+    *,
+    db_path: Path | str,
+    q: str,
+    github: GithubRunner | None = None,
+    now: datetime | None = None,
+    sha_hint: str | None = None,
+    repo_globs: list[str] | None = None,
+    app_name: str | None = None,
+    pinned: bool = False,
+) -> dict:
+    """Live GitHub issue search, then persist each hit as a `github_issue` source.
+
+    Closed issues get a local problem/tried/ruled-out/fix split from the
+    comment prefixes. The hunter only ever sees a `source_id` + locator —
+    retrieved text never lands in a tool argument. Auth is an installation
+    token when the default runner is used; nothing here reads `GH_TOKEN`.
+    """
+    query = (q or "").strip()
+    if not query:
+        raise ValueError("q is required")
+    if len(query) > GITHUB_Q_MAX:
+        raise ValueError("q is too long")
+    runner = github or _default_github
+    qs = urlencode(
+        {
+            "q": _construct_github_q(query),
+            "advanced_search": "true",
+            "per_page": str(GITHUB_SEARCH_MAX),
+        }
+    )
+    rc, payload = runner("GET", f"{GITHUB_SEARCH_PATH}?{qs}", None)
+    if rc != 0 or not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise RuntimeError("github search failed")
+
+    incomplete = payload.get("incomplete_results") is True
+    moment = now or datetime.now(timezone.utc)
+    sources: list[dict] = []
+    comment_calls = [0]
+    with session(db_path) as conn:
+        conn.execute("BEGIN")
+        try:
+            for item in payload["items"]:
+                if not isinstance(item, dict):
+                    continue
+                written = _upsert_github_issue(
+                    conn,
+                    item,
+                    moment=moment,
+                    runner=runner,
+                    sha_hint=sha_hint,
+                    repo_globs=repo_globs,
+                    app_name=app_name,
+                    pinned=pinned,
+                    comment_calls=comment_calls,
+                )
+                if written:
+                    sources.append(written)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return {"q": query, "sources": sources, "incomplete": incomplete}
 
 
 def get_thread(*, db_path: Path | str, source_id: str) -> dict:
