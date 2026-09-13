@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 from pathlib import Path
 
@@ -13,10 +15,17 @@ from triage.config import CONFIG
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, error: str, detail: str) -> None:
+    def __init__(
+        self,
+        status: int,
+        error: str,
+        detail: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status = status
         self.error = error
         self.detail = detail
+        self.headers = headers
 
 
 def error_response(
@@ -47,12 +56,25 @@ def _validation_detail(exc: RequestValidationError) -> str:
 
 
 def require_auth(request: Request) -> None:
-    token = os.environ.get("TRIAGE_API_TOKEN")
-    if not token:
+    stored = os.environ.get("TRIAGE_API_TOKEN")
+    if not stored:
         return
-    header = request.headers.get("authorization", "")
-    if header != f"Bearer {token}":
-        raise ApiError(401, "unauthorized", "invalid or missing token")
+    parts = request.headers.get("authorization", "").split(None, 1)
+    # Hash first so compare_digest always sees two 32-byte buffers.
+    if (
+        len(parts) != 2
+        or parts[0].lower() != "bearer"
+        or not hmac.compare_digest(
+            hashlib.sha256(parts[1].encode()).digest(),
+            hashlib.sha256(stored.encode()).digest(),
+        )
+    ):
+        raise ApiError(
+            401,
+            "unauthorized",
+            "invalid or missing token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def _default_policies() -> dict:
@@ -84,7 +106,7 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
 
     @app.exception_handler(ApiError)
     async def _api_error(_request: Request, exc: ApiError) -> JSONResponse:
-        return error_response(exc.status, exc.error, exc.detail)
+        return error_response(exc.status, exc.error, exc.detail, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_request: Request, exc: RequestValidationError) -> JSONResponse:

@@ -164,12 +164,14 @@ def test_token_set_requires_bearer_on_routers(
         "error": "unauthorized",
         "detail": "invalid or missing token",
     }
+    assert unauthenticated.headers["www-authenticate"] == "Bearer"
 
     wrong = client.post(
         "/engagements", json=payload, headers={"Authorization": "Bearer nope"}
     )
     assert wrong.status_code == 401
     assert wrong.json()["error"] == "unauthorized"
+    assert wrong.headers["www-authenticate"] == "Bearer"
 
     good = client.post(
         "/engagements", json=payload, headers={"Authorization": "Bearer s3cret"}
@@ -187,6 +189,50 @@ def test_health_open_when_token_set(
     health = client.get("/health")
     assert health.status_code == 200
     assert health.json() == {"ok": True}
+
+
+def test_401_sends_www_authenticate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRIAGE_API_TOKEN", "s3cret")
+    client = _client(tmp_path / "api.db")
+    body = {"error": "unauthorized", "detail": "invalid or missing token"}
+
+    missing = client.get("/engagements")
+    assert missing.status_code == 401
+    assert missing.json() == body
+    assert missing.headers["www-authenticate"] == "Bearer"
+
+    wrong = client.get("/engagements", headers={"Authorization": "Bearer nope"})
+    assert wrong.status_code == 401
+    assert wrong.json() == body
+    assert wrong.headers["www-authenticate"] == "Bearer"
+
+
+def test_bearer_scheme_is_case_insensitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRIAGE_API_TOKEN", "s3cret")
+    client = _client(tmp_path / "api.db")
+
+    resp = client.get("/engagements", headers={"Authorization": "bearer s3cret"})
+    assert resp.status_code == 200
+    assert "engagements" in resp.json()
+
+
+@pytest.mark.parametrize("token", [None, ""])
+def test_token_unset_or_empty_still_fail_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: str | None
+) -> None:
+    if token is None:
+        monkeypatch.delenv("TRIAGE_API_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("TRIAGE_API_TOKEN", token)
+    client = _client(tmp_path / "api.db")
+
+    resp = client.get("/engagements")
+    assert resp.status_code == 200
+    assert "engagements" in resp.json()
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
@@ -452,6 +498,7 @@ def test_run_events_401_before_503_when_token_set(
 
     assert resp.status_code == 401
     assert resp.json()["error"] == "unauthorized"
+    assert resp.headers["www-authenticate"] == "Bearer"
 
 
 def test_policies_rejects_unknown_blast_radius(tmp_path: Path) -> None:
