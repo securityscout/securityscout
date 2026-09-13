@@ -1,4 +1,4 @@
-"""Knowledge sources: list, source detail, cited page, PDF, Jira, GitHub issues."""
+"""Knowledge sources: list, source detail, cited page, PDF, Jira, GitHub issues, advisories."""
 
 from __future__ import annotations
 
@@ -26,6 +26,11 @@ class JiraSearchIn(BaseModel):
 
 class GithubIssuesIn(BaseModel):
     q: str
+
+
+class GithubAdvisoriesIn(BaseModel):
+    org: str
+    repo: str | None = None
 
 
 def _preview(source: dict[str, Any]) -> dict[str, Any]:
@@ -185,6 +190,40 @@ def post_knowledge_github_issues(body: GithubIssuesIn, request: Request) -> dict
             source_ids=[row["source_id"] for row in result["sources"]],
         ),
         "incomplete": result["incomplete"],
+    }
+
+
+@router.post("/knowledge/github-advisories", status_code=201)
+def post_knowledge_github_advisories(body: GithubAdvisoriesIn, request: Request) -> dict[str, Any]:
+    """Live org/repo advisories against the injected `gh` runner.
+
+    `app.state.gh` is the same slot as POST /engagements/import.
+    `github_search` and a ticket sink on `github` are ignored. A failed
+    index is a fixed-string 502 — runner text can carry a path or token.
+    """
+    org = body.org.strip()
+    if not org:
+        raise ApiError(400, "invalid_request", "org is required")
+    repo = (body.repo or "").strip() or None
+    db_path = request.app.state.db_path
+    try:
+        result = knowledge.index_advisories(
+            db_path=db_path,
+            org=org,
+            repo=repo,
+            gh=knowledge.gh_from_state(request.app.state),
+        )
+    except ValueError as exc:
+        raise ApiError(400, "invalid_request", "repo must be owner/name") from exc
+    except RuntimeError as exc:
+        raise ApiError(502, "upstream", "github advisories failed") from exc
+    return {
+        "org": result["org"],
+        "repo": result["repo"],
+        "sources": knowledge.previews(
+            db_path=db_path,
+            source_ids=[row["source_id"] for row in result["sources"]],
+        ),
     }
 
 

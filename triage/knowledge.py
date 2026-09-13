@@ -1,12 +1,13 @@
-"""Knowledge ingest: PDF, Jira, and GitHub issues; decay; SHA binding.
+"""Knowledge ingest: PDF, Jira, GitHub issues, and advisories; decay; SHA binding.
 
-A chunk is a hypothesis, never a verdict. PDF, Jira, and GitHub
-issue bodies are untrusted: text is redacted and stored, and
-retrieval hands back a `source_id` + locator for a hunter to cite.
+A chunk is a hypothesis, never a verdict. PDF, Jira, GitHub
+issue, and advisory bodies are untrusted: text is redacted and stored,
+and retrieval hands back a `source_id` + locator for a hunter to cite.
 Nothing here writes `runs.scope_json` or `runs.blast_radius` — the
 gateway reads those off the run row, which is what makes an injected
 instruction inert. GitHub issue ingest authenticates as an app
-installation, not with an operator `gh` token.
+installation, not with an operator `gh` token. Advisory ingest uses
+`gh api` and never mints an installation token.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from triage.verifier import strip_replay_passed, verify_finding
 
 JiraRunner = Callable[[str, str, dict | None], tuple[int, Any]]
 GithubRunner = Callable[[str, str, dict | None], tuple[int, Any]]
+AdvisoryGh = Callable[[list[str]], tuple[int, str, str]]
 
 KINDS = ("pdf", "jira", "github_issue", "github_advisory")
 HALFLIFE_ENV = "KNOWLEDGE_HALFLIFE_DAYS"
@@ -74,6 +76,22 @@ GITHUB_COMMENT_CALL_CAP = 20
 GITHUB_DEFAULT_LABELS = ("security", "vulnerability", "advisory")
 GITHUB_IAT_SKEW = 60
 _IAT: dict[str, Any] = {"token": "", "exp": 0.0}
+_OWNER_NAME = re.compile(r"^[^/]+/[^/]+$")
+_ADVISORY_STATUSES = {
+    "draft": "open",
+    "published": "open",
+    "closed": "fixed",
+    "withdrawn": "withdrawn",
+    "triage": "unknown",
+}
+_ADVISORY_SEVERITIES = frozenset({"critical", "high", "medium", "low"})
+_REVISION_EVENTS = ("published_at", "updated_at", "closed_at", "withdrawn_at")
+_REVISION_IDS = {
+    "published_at": "published",
+    "updated_at": "updated",
+    "closed_at": "closed",
+    "withdrawn_at": "withdrawn",
+}
 
 # Emails, customer account ids and credentials never reach a chunk: the
 # PII gate is code, not a line in a prompt.
@@ -381,6 +399,34 @@ def github_runner_from_state(state: Any) -> GithubRunner | None:
         if callable(value):
             return value
     return None
+
+
+def gh_from_state(state: Any) -> AdvisoryGh | None:
+    """Callable `gh` only. Same slot as POST /engagements/import.
+
+    Ignore `github_search`. Ignore `github` whether it is a ticket
+    sink or a callable issue runner.
+    """
+    value = getattr(state, "gh", None)
+    return value if callable(value) else None
+
+
+def _default_gh(argv: list[str]) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            encoding="latin-1",
+            stdin=subprocess.DEVNULL,
+            timeout=60.0,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return -1, "", f"{type(exc).__name__}: {exc}"
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _owner_name(repo: str) -> bool:
+    return bool(_OWNER_NAME.fullmatch(repo))
 
 
 def _github_labels() -> list[str]:
@@ -1043,6 +1089,256 @@ def search_issues(
             conn.execute("ROLLBACK")
             raise
     return {"q": query, "sources": sources, "incomplete": incomplete}
+
+
+def _advisory_status(state: Any) -> str:
+    return _ADVISORY_STATUSES.get(str(state or ""), "unknown")
+
+
+def _advisory_severity(value: Any) -> str:
+    raw = str(value or "")
+    return raw if raw in _ADVISORY_SEVERITIES else ""
+
+
+def _advisory_locator(item: dict, *, repo: str | None) -> str:
+    ghsa_id = str(item.get("ghsa_id") or "")
+    repository = item.get("repository")
+    full_name = ""
+    if isinstance(repository, dict):
+        full_name = str(repository.get("full_name") or "")
+    if full_name:
+        return f"{full_name}/{ghsa_id}"
+    if repo:
+        return f"{repo}/{ghsa_id}"
+    return ghsa_id
+
+
+def _package_hint(vulnerabilities: Any) -> str:
+    if not isinstance(vulnerabilities, list):
+        return ""
+    for row in vulnerabilities:
+        if not isinstance(row, dict):
+            continue
+        package = row.get("package")
+        if not isinstance(package, dict):
+            continue
+        name = str(package.get("name") or "").strip()
+        if name:
+            return name
+    return ""
+
+
+def _patched_versions(vulnerabilities: Any) -> list[str]:
+    if not isinstance(vulnerabilities, list):
+        return []
+    versions: list[str] = []
+    for row in vulnerabilities:
+        if not isinstance(row, dict):
+            continue
+        raw = str(row.get("patched_versions") or "").strip()
+        if raw:
+            versions.append(raw)
+    return versions
+
+
+def _advisory_assessment_date(item: dict, moment: datetime) -> str:
+    for key in ("updated_at", "published_at"):
+        parsed = _stamp(str(item.get(key) or "").replace("Z", "+00:00"))
+        if parsed:
+            return parsed.date().isoformat()
+    return moment.date().isoformat()
+
+
+def _advisory_revisions(item: dict) -> list[dict]:
+    publisher = item.get("publisher")
+    author = (
+        str(publisher.get("login") or "") if isinstance(publisher, dict) else ""
+    )
+    published = str(item.get("published_at") or "")
+    comments: list[dict] = []
+    for key in _REVISION_EVENTS:
+        stamp = str(item.get(key) or "")
+        if not stamp:
+            continue
+        event = _REVISION_IDS[key]
+        if event == "updated" and stamp == published:
+            continue
+        comments.append(
+            {
+                "id": event,
+                "author": redact(author),
+                "created": stamp,
+                "text": event,
+            }
+        )
+    return comments
+
+
+def _upsert_advisory(
+    conn,
+    item: dict,
+    *,
+    moment: datetime,
+    repo: str | None,
+    sha_hint: str | None,
+    repo_globs: list[str] | None,
+    app_name: str | None,
+    pinned: bool,
+) -> dict | None:
+    ghsa_id = str(item.get("ghsa_id") or "").strip()
+    if not ghsa_id:
+        return None
+    summary = str(item.get("summary") or "")
+    title = redact(summary or ghsa_id)
+    description = redact(str(item.get("description") or ""))
+    cve_id = "" if item.get("cve_id") is None else str(item.get("cve_id") or "")
+    package_hint = _package_hint(item.get("vulnerabilities"))
+    locator = _advisory_locator(item, repo=repo)
+    status = _advisory_status(item.get("state"))
+    assessment_date = _advisory_assessment_date(item, moment)
+    digest = hashlib.sha256(
+        gateway.canonical_json_bytes(
+            {
+                "ghsa_id": ghsa_id,
+                "summary": summary,
+                "description": str(item.get("description") or ""),
+                "vulnerabilities": item.get("vulnerabilities"),
+            }
+        )
+    ).hexdigest()
+
+    existing = conn.execute(
+        "SELECT id FROM knowledge_sources WHERE kind = 'github_advisory' AND uri = ?",
+        (ghsa_id,),
+    ).fetchone()
+    previous_pinned = False
+    if existing:
+        source_id = existing["id"]
+        old = conn.execute(
+            "SELECT meta_json FROM knowledge_chunks WHERE source_id = ? ORDER BY rowid",
+            (source_id,),
+        ).fetchone()
+        previous_pinned = bool(_meta(old["meta_json"] if old else None).get("pinned"))
+        conn.execute("DELETE FROM knowledge_chunks WHERE source_id = ?", (source_id,))
+        conn.execute(
+            "UPDATE knowledge_sources SET title = ?, assessment_date = ?, sha256 = ? WHERE id = ?",
+            (title, assessment_date, digest, source_id),
+        )
+    else:
+        source_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO knowledge_sources (id, kind, title, uri, assessment_date, sha256) "
+            "VALUES (?, 'github_advisory', ?, ?, ?, ?)",
+            (source_id, title, ghsa_id, assessment_date, digest),
+        )
+
+    lines = [description]
+    if summary and summary not in description:
+        lines.append(redact(summary))
+    if package_hint:
+        lines.append(f"package: {package_hint}")
+    if cve_id:
+        lines.append(cve_id)
+    meta: dict[str, Any] = {
+        "source_kind": "github_advisory",
+        "ghsa_id": ghsa_id,
+        "cve_id": cve_id,
+        "severity": _advisory_severity(item.get("severity")),
+        "rest_state": str(item.get("state") or ""),
+        "package_hint": package_hint,
+        "patched_versions": _patched_versions(item.get("vulnerabilities")),
+        "published_at": str(item.get("published_at") or ""),
+        "updated_at": str(item.get("updated_at") or ""),
+        "repo_globs": list(repo_globs or []),
+        "sha_hint": sha_hint or "",
+        "app_name": app_name or "",
+        "ingested_at": moment.isoformat(),
+        "assessment_date": assessment_date,
+        "status": status,
+        "pinned": bool(pinned) or previous_pinned,
+        "comments": _advisory_revisions(item),
+    }
+    conn.execute(
+        "INSERT INTO knowledge_chunks (id, source_id, locator, text, embedding, meta_json) "
+        "VALUES (?, ?, ?, ?, NULL, ?)",
+        (
+            uuid.uuid4().hex,
+            source_id,
+            locator,
+            "\n".join(part for part in lines if part),
+            json.dumps(meta, ensure_ascii=False),
+        ),
+    )
+    return {
+        "source_id": source_id,
+        "locator": locator,
+        "status": status,
+        "title": title,
+    }
+
+
+def index_advisories(
+    *,
+    db_path: Path | str,
+    org: str,
+    repo: str | None = None,
+    gh: AdvisoryGh | None = None,
+    now: datetime | None = None,
+    sha_hint: str | None = None,
+    repo_globs: list[str] | None = None,
+    app_name: str | None = None,
+    pinned: bool = False,
+) -> dict:
+    """Live org or repo security advisories, persisted as `github_advisory` sources.
+
+    Auth is `gh api`, not an installation token and not OSV. One call
+    with `--paginate`. The hunter only ever sees a `source_id` + locator.
+    """
+    name = (org or "").strip()
+    if not name:
+        raise ValueError("org is required")
+    scoped = (repo or "").strip() or None
+    if scoped is not None and not _owner_name(scoped):
+        raise ValueError("repo must be owner/name")
+    if scoped:
+        path = f"repos/{scoped}/security-advisories"
+    else:
+        path = f"orgs/{name}/security-advisories"
+    runner = gh or _default_gh
+    rc, stdout, _stderr = runner(["gh", "api", path, "--paginate"])
+    if rc != 0:
+        raise RuntimeError("github advisories failed")
+    raw = (stdout or "").strip()
+    if not raw:
+        items: list[Any] = []
+    else:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("github advisories failed") from exc
+        if not isinstance(parsed, list):
+            raise RuntimeError("github advisories failed")
+        items = parsed
+
+    moment = now or datetime.now(timezone.utc)
+    sources: list[dict] = []
+    with session(db_path) as conn:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            written = _upsert_advisory(
+                conn,
+                item,
+                moment=moment,
+                repo=scoped,
+                sha_hint=sha_hint,
+                repo_globs=repo_globs,
+                app_name=app_name,
+                pinned=pinned,
+            )
+            if written:
+                sources.append(written)
+    return {"org": name, "repo": scoped, "sources": sources}
 
 
 def get_thread(*, db_path: Path | str, source_id: str) -> dict:
