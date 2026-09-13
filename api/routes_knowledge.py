@@ -1,4 +1,4 @@
-"""Knowledge sources: list, source detail, cited page, PDF upload."""
+"""Knowledge sources: list, source detail, cited page, PDF upload, Jira JQL."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ router = APIRouter()
 class PdfUpload(BaseModel):
     filename: str
     content_b64: str
+
+
+class JiraSearchIn(BaseModel):
+    jql: str
 
 
 def _preview(source: dict[str, Any]) -> dict[str, Any]:
@@ -112,3 +116,43 @@ def post_knowledge_pdf(body: PdfUpload, request: Request) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         raise ApiError(400, "invalid_request", "could not parse pdf") from exc
     return _preview(knowledge.get(db_path=db_path, source_id=ingested["source_id"]))
+
+
+@router.post("/knowledge/jira", status_code=201)
+def post_knowledge_jira(body: JiraSearchIn, request: Request) -> dict[str, Any]:
+    """Live JQL against the injected runner; persist each issue as a source.
+
+    `app.state.jira_search` is the JQL runner. `app.state.jira` is only
+    used when it is callable — a ticket sink parked there is ignored so
+    `python -m api` can keep `DefaultJiraSink`. Unset, the library
+    default reads `JIRA_*`. A failed search is a fixed-string 502.
+    """
+    jql = body.jql.strip()
+    if not jql:
+        raise ApiError(400, "invalid_request", "jql is required")
+    if len(jql) > knowledge.JIRA_JQL_MAX:
+        raise ApiError(400, "invalid_request", "jql is too long")
+    db_path = request.app.state.db_path
+    try:
+        result = knowledge.search_jql(
+            db_path=db_path,
+            jql=jql,
+            jira=knowledge.runner_from_state(request.app.state),
+        )
+    except RuntimeError as exc:
+        raise ApiError(502, "upstream", "jira search failed") from exc
+    return {
+        "jql": result["jql"],
+        "sources": knowledge.previews(
+            db_path=db_path,
+            source_ids=[row["source_id"] for row in result["sources"]],
+        ),
+    }
+
+
+@router.get("/knowledge/{source_id}/thread")
+def get_knowledge_thread(source_id: str, request: Request) -> dict[str, Any]:
+    try:
+        return knowledge.get_thread(db_path=request.app.state.db_path, source_id=source_id)
+    except ValueError as exc:
+        raise ApiError(404, "not_found", "source not found") from exc

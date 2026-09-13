@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createRoute, Link } from "@tanstack/react-router";
+import { createRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useRef, useState } from "react";
 
 import { ApiError, apiRequest } from "../api";
@@ -12,6 +12,7 @@ type KnowledgeSource = {
   id: string;
   kind: string;
   title: string;
+  uri?: string;
   assessment_date: string;
   citation: string;
   page: number | null;
@@ -51,9 +52,12 @@ function readBase64(file: File): Promise<string> {
 
 export function KnowledgePage() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { source: selectedId, page } = knowledgeRoute.useSearch();
   const [kind, setKind] = useState("all");
   const fileInput = useRef<HTMLInputElement>(null);
+  const jqlInput = useRef<HTMLInputElement>(null);
+  const openedAfterJira = useRef<string | null>(null);
 
   const {
     data: knowledge,
@@ -80,25 +84,58 @@ export function KnowledgePage() {
     },
   });
 
+  const jira = useMutation({
+    mutationFn: (jql: string) =>
+      apiRequest<{ jql: string; sources: KnowledgeSource[] }>("/knowledge/jira", {
+        method: "POST",
+        body: { jql },
+      }),
+    onSuccess: (added) => {
+      const sourceId = added.sources.at(-1)?.id ?? null;
+      openedAfterJira.current = sourceId;
+      queryClient.setQueryData<Knowledge>(["knowledge"], (old) => {
+        const current = old?.sources ?? [];
+        const incoming = added.sources;
+        const kept = current.map(
+          (source) => incoming.find((row) => row.id === source.id) ?? source,
+        );
+        const appended = incoming.filter(
+          (row) => !current.some((source) => source.id === row.id),
+        );
+        return {
+          halflife_days: old?.halflife_days ?? fixture.halflife_days,
+          sources: [...kept, ...appended],
+        };
+      });
+      if (sourceId) {
+        setKind("all");
+        navigate({ to: "/knowledge", search: { source: sourceId } });
+      }
+    },
+  });
+
   const sources = knowledge.sources.filter(
     (source) => kind === "all" || source.kind === kind,
   );
   const opened =
-    sources.find((source) => source.id === selectedId) ?? sources[0] ?? null;
-  const alert = isError
-    ? asApiError(error)
-    : upload.isError
-      ? asApiError(upload.error)
-      : null;
+    sources.find((source) => source.id === selectedId) ??
+    sources.find((source) => source.id === openedAfterJira.current) ??
+    sources[0] ??
+    null;
+  const alerts = [
+    isError ? asApiError(error) : null,
+    upload.isError ? asApiError(upload.error) : null,
+    jira.isError ? asApiError(jira.error) : null,
+  ].filter((item): item is ApiError => item !== null);
 
   return (
     <>
       <h1>Knowledge</h1>
-      {alert ? (
-        <p role="alert">
-          {alert.error} {alert.detail}
+      {alerts.map((item) => (
+        <p key={`${item.error}:${item.detail}`} role="alert">
+          {item.error} {item.detail}
         </p>
-      ) : null}
+      ))}
       <p>Chunks decay with a {knowledge.halflife_days}-day halflife.</p>
       <form
         onSubmit={(event) => {
@@ -114,6 +151,21 @@ export function KnowledgePage() {
           <input ref={fileInput} type="file" accept="application/pdf" />
         </label>
         <button type="submit">Upload</button>
+      </form>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          const jql = jqlInput.current?.value.trim() ?? "";
+          if (jql) {
+            jira.mutate(jql);
+          }
+        }}
+      >
+        <label>
+          JQL
+          <input ref={jqlInput} />
+        </label>
+        <button type="submit">Index Jira</button>
       </form>
       <label>
         Kind
@@ -147,7 +199,11 @@ export function KnowledgePage() {
           {opened ? (
             <>
               <h2>{opened.citation}</h2>
-              <p className="mono">page {page ?? opened.page}</p>
+              <p className="mono">
+                {opened.kind === "jira"
+                  ? opened.uri
+                  : `page ${page ?? opened.page}`}
+              </p>
               <p>{opened.page_text}</p>
             </>
           ) : null}

@@ -1,10 +1,10 @@
-"""PDF knowledge: ingest with page citations, decay, SHA binding, retention.
+"""Knowledge ingest: PDF pages and Jira issues, decay, SHA binding, retention.
 
-A chunk is a hypothesis, never a verdict. PDF bodies are untrusted: text
-is redacted and stored, and retrieval hands back a `source_id` + locator
-for a hunter to cite. Nothing here writes `runs.scope_json` or
-`runs.blast_radius` — the gateway reads those off the run row, which is
-what makes an injected instruction in a PDF inert.
+A chunk is a hypothesis, never a verdict. PDF and Jira bodies are
+untrusted: text is redacted and stored, and retrieval hands back a
+`source_id` + locator for a hunter to cite. Nothing here writes
+`runs.scope_json` or `runs.blast_radius` — the gateway reads those off
+the run row, which is what makes an injected instruction inert.
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ from triage.hunt import merge_or_insert
 from triage.status import cas_status
 from triage.verifier import strip_replay_passed, verify_finding
 
+JiraRunner = Callable[[str, str, dict | None], tuple[int, Any]]
+
 KINDS = ("pdf", "jira", "github_issue", "github_advisory")
 HALFLIFE_ENV = "KNOWLEDGE_HALFLIFE_DAYS"
 DEFAULT_HALFLIFE_DAYS = 365
@@ -45,6 +47,13 @@ V2_HOST = "v2.fixture.invalid"
 V2_URL = f"https://{V2_HOST}/v2/orders/1"
 V2_ENTRY = ("app.py", 1)
 NO_PROOF_SHA256 = "0" * 64
+JIRA_SEARCH_PATH = "/rest/api/3/search/jql"
+JIRA_SEARCH_FIELDS = ("summary", "description", "status", "updated", "comment")
+JIRA_SEARCH_MAX = 50
+JIRA_JQL_MAX = 8192
+JIRA_COMMENT_PAGE = 50
+JIRA_COMMENT_PAGE_CAP = 20
+JIRA_CLOSED_NAMES = frozenset({"closed", "done", "resolved", "fixed"})
 
 # Emails, customer account ids and credentials never reach a chunk: the
 # PII gate is code, not a line in a prompt.
@@ -112,7 +121,7 @@ def default_parse(pdf_bytes: bytes) -> list[dict]:
 def _default_extract(_chunks: list[dict], *, filename: str, now: datetime) -> dict:
     """Local heuristic stand-in for the offline LLM extract.
 
-    No model call this slice; a wrong structured record would bind a
+    No model call at ingest; a wrong structured record would bind a
     chunk to the wrong repo and outrank a correct one.
     """
     return {
@@ -245,7 +254,7 @@ def search(
 ) -> list[dict]:
     """Lexical retrieval over chunk text and source title.
 
-    No embedding model this slice; `knowledge_chunks.embedding` stays
+    No embedding model; `knowledge_chunks.embedding` stays
     NULL. Ranking is decay only, so an old or fixed finding cannot
     outrank a current one just by matching more words.
     """
@@ -315,11 +324,382 @@ def get(*, db_path: Path | str, source_id: str) -> dict:
             {
                 "locator": chunk["locator"],
                 "text": chunk["text"],
-                "page": int(meta.get("page") or 1),
+                "page": None if meta.get("page") is None else int(meta["page"]),
             }
             for chunk, meta in zip(chunks, metas)
         ],
     }
+
+
+_JIRA_TZ = re.compile(r"([+-]\d{2})(\d{2})$")
+_ENRICH_PREFIXES = (("tried", "tried"), ("ruled_out", "ruled out"), ("fix", "fix"))
+
+
+def runner_from_state(state: Any) -> JiraRunner | None:
+    """Prefer `jira_search`. Ignore a ticket sink parked on `jira`.
+
+    `python -m api` sets `app.state.jira` to `DefaultJiraSink` (`create` /
+    `comment`). That object is not a JQL runner. A callable on
+    `jira_search` or `jira` wins; anything else falls through to the
+    library default.
+    """
+    for name in ("jira_search", "jira"):
+        value = getattr(state, name, None)
+        if callable(value):
+            return value
+    return None
+
+
+def adf_to_text(node: Any) -> str:
+    if isinstance(node, str):
+        return node
+    if not isinstance(node, dict):
+        return ""
+    if node.get("type") == "text":
+        return str(node.get("text") or "")
+    content = node.get("content")
+    if not isinstance(content, list):
+        return ""
+    if node.get("type") == "doc":
+        parts = [adf_to_text(child) for child in content]
+        return "\n".join(part for part in parts if part)
+    return "".join(adf_to_text(child) for child in content)
+
+
+def _default_jira(method: str, path: str, body: dict | None = None) -> tuple[int, Any]:
+    import httpx
+
+    base = os.environ.get("JIRA_BASE_URL")
+    email = os.environ.get("JIRA_EMAIL")
+    token = os.environ.get("JIRA_API_TOKEN")
+    if not base or not email or not token:
+        return -1, {}
+    try:
+        kwargs: dict[str, Any] = {}
+        if body is not None:
+            kwargs["json"] = body
+        response = httpx.request(
+            method,
+            f"{base.rstrip('/')}{path}",
+            auth=(email, token),
+            timeout=30.0,
+            **kwargs,
+        )
+    except (httpx.TimeoutException, httpx.HTTPError, OSError):
+        return -1, {}
+    if 200 <= response.status_code < 300:
+        try:
+            return 0, response.json()
+        except ValueError:
+            return -1, {}
+    return response.status_code, {}
+
+
+def _jira_assessment_date(updated: Any, moment: datetime) -> str:
+    raw = str(updated or "")
+    match = _JIRA_TZ.search(raw)
+    if match:
+        raw = _JIRA_TZ.sub(lambda m: f"{m.group(1)}:{m.group(2)}", raw)
+    parsed = _stamp(raw)
+    return parsed.date().isoformat() if parsed else moment.date().isoformat()
+
+
+def _jira_status(fields: dict) -> str:
+    status = fields.get("status") if isinstance(fields.get("status"), dict) else {}
+    name = str(status.get("name") or "").lower()
+    category = status.get("statusCategory")
+    key = ""
+    if isinstance(category, dict):
+        key = str(category.get("key") or "").lower()
+    if key == "done" or name in JIRA_CLOSED_NAMES:
+        return "fixed"
+    return "open"
+
+
+def _parse_comment_rows(raw_list: Any) -> list[dict]:
+    if not isinstance(raw_list, list):
+        return []
+    comments = []
+    for raw in raw_list:
+        if not isinstance(raw, dict):
+            continue
+        author = raw.get("author")
+        comments.append(
+            {
+                "id": str(raw.get("id") or ""),
+                "author": str(author.get("displayName") or "") if isinstance(author, dict) else "",
+                "created": str(raw.get("created") or ""),
+                "text": redact(adf_to_text(raw.get("body"))),
+            }
+        )
+    return comments
+
+
+def _jira_comments(fields: dict, *, key: str, runner: JiraRunner) -> list[dict]:
+    block = fields.get("comment") if isinstance(fields.get("comment"), dict) else {}
+    comments = _parse_comment_rows(block.get("comments"))
+    total = block.get("total")
+    if not isinstance(total, int) or total <= len(comments):
+        return comments
+    start = len(comments)
+    pages = 0
+    while start < total and pages < JIRA_COMMENT_PAGE_CAP:
+        rc, payload = runner(
+            "GET",
+            f"/rest/api/3/issue/{key}/comment?startAt={start}&maxResults={JIRA_COMMENT_PAGE}",
+            None,
+        )
+        if rc != 0 or not isinstance(payload, dict):
+            break
+        extra = _parse_comment_rows(payload.get("comments"))
+        if not extra:
+            break
+        comments.extend(extra)
+        start = len(comments)
+        pages += 1
+    return comments
+
+
+def _has_enrich_prefix(text: str, prefix: str) -> bool:
+    return text.startswith(f"{prefix}:") or text.startswith(f"{prefix} :")
+
+
+def _jira_enrichment(description: str, comments: list[dict]) -> dict:
+    found = {"tried": "", "ruled_out": "", "fix": ""}
+    for comment in comments:
+        lower = comment["text"].lstrip().lower()
+        for key, prefix in _ENRICH_PREFIXES:
+            if not found[key] and _has_enrich_prefix(lower, prefix):
+                found[key] = comment["text"]
+    return {"problem": description, **found}
+
+
+def _upsert_jira_issue(
+    conn,
+    issue: dict,
+    *,
+    moment: datetime,
+    runner: JiraRunner,
+    sha_hint: str | None,
+    repo_globs: list[str] | None,
+    app_name: str | None,
+    pinned: bool,
+) -> dict | None:
+    key = str(issue.get("key") or "").strip()
+    if not key:
+        return None
+    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
+    summary = str(fields.get("summary") or key)
+    description = redact(adf_to_text(fields.get("description")))
+    comments = _jira_comments(fields, key=key, runner=runner)
+    status = _jira_status(fields)
+    assessment_date = _jira_assessment_date(fields.get("updated"), moment)
+    digest = hashlib.sha256(
+        gateway.canonical_json_bytes(
+            {
+                "key": key,
+                "summary": summary,
+                "description": description,
+                "comments": [comment["text"] for comment in comments],
+            }
+        )
+    ).hexdigest()
+
+    existing = conn.execute(
+        "SELECT id FROM knowledge_sources WHERE kind = 'jira' AND uri = ?",
+        (key,),
+    ).fetchone()
+    previous_pinned = False
+    if existing:
+        source_id = existing["id"]
+        old = conn.execute(
+            "SELECT meta_json FROM knowledge_chunks WHERE source_id = ? ORDER BY rowid",
+            (source_id,),
+        ).fetchone()
+        previous_pinned = bool(_meta(old["meta_json"] if old else None).get("pinned"))
+        conn.execute("DELETE FROM knowledge_chunks WHERE source_id = ?", (source_id,))
+        conn.execute(
+            "UPDATE knowledge_sources SET title = ?, assessment_date = ?, sha256 = ? WHERE id = ?",
+            (summary, assessment_date, digest, source_id),
+        )
+    else:
+        source_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO knowledge_sources (id, kind, title, uri, assessment_date, sha256) "
+            "VALUES (?, 'jira', ?, ?, ?, ?)",
+            (source_id, summary, key, assessment_date, digest),
+        )
+
+    meta: dict[str, Any] = {
+        "source_kind": "jira",
+        "repo_globs": list(repo_globs or []),
+        "sha_hint": sha_hint or "",
+        "app_name": app_name or "",
+        "package_hint": "",
+        "ingested_at": moment.isoformat(),
+        "assessment_date": assessment_date,
+        "status": status,
+        "pinned": bool(pinned) or previous_pinned,
+        "comments": comments,
+    }
+    lines = [description]
+    if status == "fixed":
+        enrich = _jira_enrichment(description, comments)
+        meta.update(enrich)
+        lines.extend(enrich[key] for key in ("tried", "ruled_out", "fix") if enrich[key])
+    conn.execute(
+        "INSERT INTO knowledge_chunks (id, source_id, locator, text, embedding, meta_json) "
+        "VALUES (?, ?, ?, ?, NULL, ?)",
+        (
+            uuid.uuid4().hex,
+            source_id,
+            key,
+            "\n".join(part for part in lines if part),
+            json.dumps(meta, ensure_ascii=False),
+        ),
+    )
+    return {
+        "source_id": source_id,
+        "key": key,
+        "locator": key,
+        "status": status,
+        "title": summary,
+    }
+
+
+def search_jql(
+    *,
+    db_path: Path | str,
+    jql: str,
+    jira: JiraRunner | None = None,
+    now: datetime | None = None,
+    sha_hint: str | None = None,
+    repo_globs: list[str] | None = None,
+    app_name: str | None = None,
+    pinned: bool = False,
+) -> dict:
+    """Live JQL, then persist each issue as a `jira` source.
+
+    Closed issues get a local problem/tried/ruled-out/fix split from the
+    comment prefixes. The hunter only ever sees a `source_id` + key —
+    retrieved text never lands in a tool argument.
+    """
+    query = (jql or "").strip()
+    if not query:
+        raise ValueError("jql is required")
+    if len(query) > JIRA_JQL_MAX:
+        raise ValueError("jql is too long")
+    runner = jira or _default_jira
+    rc, payload = runner(
+        "POST",
+        JIRA_SEARCH_PATH,
+        {
+            "jql": query,
+            "maxResults": JIRA_SEARCH_MAX,
+            "fields": list(JIRA_SEARCH_FIELDS),
+        },
+    )
+    if rc != 0 or not isinstance(payload, dict) or not isinstance(payload.get("issues"), list):
+        raise RuntimeError("jira search failed")
+
+    moment = now or datetime.now(timezone.utc)
+    sources: list[dict] = []
+    with session(db_path) as conn:
+        for issue in payload["issues"]:
+            if not isinstance(issue, dict):
+                continue
+            written = _upsert_jira_issue(
+                conn,
+                issue,
+                moment=moment,
+                runner=runner,
+                sha_hint=sha_hint,
+                repo_globs=repo_globs,
+                app_name=app_name,
+                pinned=pinned,
+            )
+            if written:
+                sources.append(written)
+    return {"jql": query, "sources": sources}
+
+
+def get_thread(*, db_path: Path | str, source_id: str) -> dict:
+    with session(db_path) as conn:
+        source = conn.execute(
+            "SELECT id FROM knowledge_sources WHERE id = ?", (source_id,)
+        ).fetchone()
+        if source is None:
+            raise ValueError("source not found")
+        chunks = conn.execute(
+            "SELECT locator, meta_json FROM knowledge_chunks "
+            "WHERE source_id = ? ORDER BY rowid",
+            (source_id,),
+        ).fetchall()
+    first = chunks[0] if chunks else None
+    raw = _meta(first["meta_json"]).get("comments") if first else []
+    comments = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            comments.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "author": str(item.get("author") or ""),
+                    "created": str(item.get("created") or ""),
+                    "text": str(item.get("text") or ""),
+                }
+            )
+    return {
+        "source_id": source["id"],
+        "locator": first["locator"] if first else "",
+        "comments": comments,
+    }
+
+
+def previews(*, db_path: Path | str, source_ids: list[str]) -> list[dict]:
+    """List/create preview rows for `source_ids`, one session, first chunk each."""
+    if not source_ids:
+        return []
+    placeholders = ",".join("?" * len(source_ids))
+    with session(db_path) as conn:
+        sources = {
+            row["id"]: row
+            for row in conn.execute(
+                f"SELECT * FROM knowledge_sources WHERE id IN ({placeholders})",
+                source_ids,
+            )
+        }
+        chunks = conn.execute(
+            f"SELECT source_id, locator, text, meta_json FROM knowledge_chunks "
+            f"WHERE source_id IN ({placeholders}) ORDER BY rowid",
+            source_ids,
+        ).fetchall()
+    first_by: dict[str, Any] = {}
+    for chunk in chunks:
+        first_by.setdefault(chunk["source_id"], chunk)
+    out = []
+    for sid in source_ids:
+        source = sources.get(sid)
+        if source is None:
+            continue
+        first = first_by.get(sid)
+        meta = _meta(first["meta_json"]) if first else {}
+        locator = first["locator"] if first else ""
+        out.append(
+            {
+                "id": source["id"],
+                "kind": source["kind"],
+                "title": source["title"],
+                "uri": source["uri"],
+                "assessment_date": source["assessment_date"],
+                "sha256": source["sha256"],
+                "citation": f"{source['title']} {locator}".strip() if locator else source["title"] or "",
+                "page": None if meta.get("page") is None else int(meta["page"]),
+                "page_text": first["text"] if first else "",
+            }
+        )
+    return out
 
 
 def get_page(*, db_path: Path | str, source_id: str, page: int) -> dict:
@@ -441,8 +821,8 @@ def _record_proof(conn, *, run_id: str, proof: dict, transcripts_dir: Path) -> N
     """Persist the canned transcript and the span that vouches for it.
 
     Same recipe as the hunt fixture on purpose — `hunt.py` is not
-    editable from this slice, so the writer is duplicated rather than
-    extracted. The span carries the hash of the bytes actually written;
+    edited from knowledge ingest, so the writer is duplicated rather
+    than extracted. The span carries the hash of the bytes actually written;
     a hypothesis naming any other hash fails the verifier's provenance
     gate.
     """
