@@ -69,6 +69,12 @@ export function GraphPage() {
       ) : null}
       <div className="panes">
         <section aria-label="Attack graph">
+          {/* role kept explicit: list-style: none drops it in Safari/VO */}
+          <ul role="list" aria-label="Nodes" className="mono node-list">
+            {graph.nodes.map((node) => (
+              <li key={node.id}>{node.label}</li>
+            ))}
+          </ul>
           {graph.hops.length === 0 ? (
             <p>
               No chain hops yet. A hunt records one when it reaches a finding

@@ -226,6 +226,15 @@ label {
   padding-left: 1.1rem;
 }
 
+.node-list {
+  list-style: none;
+  margin: 0 0 0.6rem;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.65rem;
+}
+
 [data-live='true'] {
   color: var(--color-signal);
   animation: live-pulse 1.6s ease-in-out infinite;
