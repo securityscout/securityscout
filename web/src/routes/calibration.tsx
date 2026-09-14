@@ -1,12 +1,12 @@
-import { createRoute } from "@tanstack/react-router";
+import { createRoute } from '@tanstack/react-router';
 
-import { calibration } from "../calibration-data";
-import { rootRoute } from "./__root";
+import { calibration } from '../calibration-data';
+import { rootRoute } from './__root';
 
 export function CalibrationPage() {
   return (
-    <section aria-label="Calibration">
-      <h1>Calibration</h1>
+    <section aria-label='Calibration'>
+      <h1 className='page-title'>Calibration</h1>
       <dl>
         <dt>Suite</dt>
         <dd>{calibration.suite_id}</dd>
@@ -39,6 +39,6 @@ export function CalibrationPage() {
 
 export const calibrationRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/calibration",
+  path: '/calibration',
   component: CalibrationPage,
 });

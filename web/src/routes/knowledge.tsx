@@ -186,7 +186,7 @@ export function KnowledgePage() {
 
   return (
     <>
-      <h1>Knowledge</h1>
+      <h1 className='page-title'>Knowledge</h1>
       {alerts.map((item) => (
         <p key={`${item.error}:${item.detail}`} role='alert'>
           {item.error} {item.detail}
@@ -276,7 +276,7 @@ export function KnowledgePage() {
           ))}
         </select>
       </label>
-      <div className='panes'>
+      <div className='panes case-file'>
         <section aria-label='Sources'>
           <ul>
             {sources.map((source) => (
