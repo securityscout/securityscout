@@ -106,7 +106,7 @@ export function RunPage() {
 
   return (
     <div>
-      <h1>Run {runId}</h1>
+      <h1 className="page-title">Run {runId}</h1>
       <div className="banner">
         <p role="status" data-live={status === "running" ? "true" : undefined}>
           {status}

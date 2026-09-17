@@ -33,6 +33,24 @@ body {
 
 .page-title {
   font-family: var(--font-serif);
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.page-header {
+  margin: 0 0 0.75rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid var(--color-hairline);
+}
+
+.page-header .page-title {
+  margin: 0;
+}
+
+.page-meta {
+  margin: 0 0 0.65rem;
+  color: var(--color-sev-low);
 }
 
 .shell {
@@ -86,6 +104,8 @@ body {
   display: flex;
   align-items: center;
   gap: 0.65rem;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .top kbd {
@@ -147,6 +167,23 @@ textarea {
   background: var(--color-page);
   border: 1px solid var(--color-hairline);
   padding: 0.25rem 0.55rem;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 1px solid var(--color-signal);
+}
+
+.chrome-search {
+  flex: 1;
+  min-width: 10rem;
+  max-width: 28rem;
+  text-align: left;
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-sev-low);
 }
 
 label {
@@ -216,7 +253,8 @@ label {
 }
 
 .console h2 {
-  font-size: 13px;
+  font-size: 15px;
+  font-weight: 600;
   margin: 0 0 0.4rem;
 }
 
@@ -299,4 +337,156 @@ label {
   display: flex;
   gap: 0.45rem;
   margin-top: 0.9rem;
+}
+
+.metric-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 0 0 0.85rem;
+  padding: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-hairline);
+}
+
+.metric-strip dt,
+.metric-strip dd {
+  margin: 0;
+  padding: 0.4rem 0.65rem;
+}
+
+.metric-strip dt {
+  grid-row: 1;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-sev-low);
+  border-bottom: 1px solid var(--color-hairline);
+}
+
+.metric-strip dd {
+  grid-row: 2;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-strip dt:not(:last-of-type),
+.metric-strip dd:not(:last-of-type) {
+  border-right: 1px solid var(--color-hairline);
+}
+
+.data-table {
+  width: 100%;
+  max-width: 36rem;
+  border-collapse: collapse;
+  background: var(--color-surface);
+  border: 1px solid var(--color-hairline);
+}
+
+.data-table th {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-sev-low);
+  background: var(--color-page);
+}
+
+.data-table td {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tbody tr:hover td {
+  background: var(--color-page);
+}
+
+.page-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.45rem 0.65rem;
+  margin: 0 0 0.75rem;
+  padding: 0.55rem 0.65rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-hairline);
+}
+
+.page-toolbar form {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.page-toolbar label {
+  margin: 0;
+}
+
+.case-file section[aria-label='Sources'] ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.case-file section[aria-label='Sources'] li {
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--color-hairline);
+}
+
+.case-file section[aria-label='Sources'] li:last-child {
+  border-bottom: none;
+}
+
+.case-file section[aria-label='Cited page'] h2 {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-signal);
+  margin: 0 0 0.4rem;
+}
+
+.policy-form {
+  display: grid;
+  gap: 0.65rem;
+  max-width: 42rem;
+}
+
+.form-section {
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--color-hairline);
+  background: var(--color-surface);
+}
+
+.form-section-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-sev-low);
+  padding: 0 0 0.45rem;
+}
+
+.policy-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0 0 0.45rem;
+}
+
+.policy-form label:last-of-type {
+  margin-bottom: 0;
+}
+
+.policy-form textarea {
+  min-height: 7rem;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.policy-form button[type='submit'] {
+  justify-self: start;
 }

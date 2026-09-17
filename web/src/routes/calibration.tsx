@@ -6,8 +6,10 @@ import { rootRoute } from './__root';
 export function CalibrationPage() {
   return (
     <section aria-label='Calibration'>
-      <h1 className='page-title'>Calibration</h1>
-      <dl>
+      <header className='page-header'>
+        <h1 className='page-title'>Calibration</h1>
+      </header>
+      <dl className='metric-strip'>
         <dt>Suite</dt>
         <dd>{calibration.suite_id}</dd>
         <dt>n</dt>
@@ -19,7 +21,7 @@ export function CalibrationPage() {
         <dt>cost_usd</dt>
         <dd>{calibration.cost_usd}</dd>
       </dl>
-      <table>
+      <table className='data-table'>
         <thead>
           <tr>
             <th>Expected</th>

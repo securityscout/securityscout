@@ -162,6 +162,7 @@ export function Shell() {
           <button
             ref={triggerRef}
             type='button'
+            className='chrome-search'
             aria-label='Command palette'
             onClick={openPalette}
           >

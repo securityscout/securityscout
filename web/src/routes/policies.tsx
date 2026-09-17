@@ -98,45 +98,55 @@ function PoliciesForm({ loaded }: { loaded: Policies }) {
         </p>
       ) : null}
       <form
+        className="policy-form"
         onSubmit={(event) => {
           event.preventDefault();
           submit();
         }}
       >
-        <label>
-          Blast radius
-          <select
-            value={blastRadius}
-            onChange={(event) =>
-              setBlastRadius(event.target.value as BlastRadius)
-            }
-          >
-            {BLAST_RADII.map((radius) => (
-              <option key={radius} value={radius}>
-                {radius}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Auto-publish
-          <input
-            type="checkbox"
-            checked={autoPublish}
-            onChange={(event) => setAutoPublish(event.target.checked)}
-          />
-        </label>
-        {JSON_FIELDS.map((field) => (
-          <label key={field.key}>
-            {field.label}
-            <textarea
-              value={text[field.key]}
+        <fieldset className="form-section">
+          <legend className="form-section-label">Execution</legend>
+          <label>
+            Blast radius
+            <select
+              value={blastRadius}
               onChange={(event) =>
-                setText((old) => ({ ...old, [field.key]: event.target.value }))
+                setBlastRadius(event.target.value as BlastRadius)
               }
+            >
+              {BLAST_RADII.map((radius) => (
+                <option key={radius} value={radius}>
+                  {radius}
+                </option>
+              ))}
+            </select>
+          </label>
+        </fieldset>
+        <fieldset className="form-section">
+          <legend className="form-section-label">Automation</legend>
+          <label>
+            Auto-publish
+            <input
+              type="checkbox"
+              checked={autoPublish}
+              onChange={(event) => setAutoPublish(event.target.checked)}
             />
           </label>
-        ))}
+        </fieldset>
+        <fieldset className="form-section">
+          <legend className="form-section-label">Configuration</legend>
+          {JSON_FIELDS.map((field) => (
+            <label key={field.key}>
+              {field.label}
+              <textarea
+                value={text[field.key]}
+                onChange={(event) =>
+                  setText((old) => ({ ...old, [field.key]: event.target.value }))
+                }
+              />
+            </label>
+          ))}
+        </fieldset>
         <button type="submit">Save</button>
       </form>
     </>
@@ -152,7 +162,9 @@ export function PoliciesPage() {
 
   return (
     <>
-      <h1>Policies</h1>
+      <header className="page-header">
+        <h1 className="page-title">Policies</h1>
+      </header>
       {isError ? (
         <p role="alert">
           {asAlert(error).error} {asAlert(error).detail}

@@ -186,13 +186,18 @@ export function KnowledgePage() {
 
   return (
     <>
-      <h1 className='page-title'>Knowledge</h1>
+      <header className='page-header'>
+        <h1 className='page-title'>Knowledge</h1>
+      </header>
       {alerts.map((item) => (
         <p key={`${item.error}:${item.detail}`} role='alert'>
           {item.error} {item.detail}
         </p>
       ))}
-      <p>Chunks decay with a {knowledge.halflife_days}-day halflife.</p>
+      <p className='page-meta'>
+        Chunks decay with a {knowledge.halflife_days}-day halflife.
+      </p>
+      <div className='page-toolbar'>
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -276,6 +281,7 @@ export function KnowledgePage() {
           ))}
         </select>
       </label>
+      </div>
       <div className='panes case-file'>
         <section aria-label='Sources'>
           <ul>

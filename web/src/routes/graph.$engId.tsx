@@ -61,7 +61,7 @@ export function GraphPage() {
 
   return (
     <>
-      <h1>Graph {engId}</h1>
+      <h1 className="page-title">Graph {engId}</h1>
       {isError ? (
         <p role="alert">
           {asApiError(error).error} {asApiError(error).detail}
